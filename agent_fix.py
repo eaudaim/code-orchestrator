@@ -652,6 +652,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
     last_test_patch_count = 0
     # Inactivité PATCH (si besoin d’ajuster la fermeté)
     consecutive_patch_idle = 0
+    patch_idle_budget = 1
+    read_phase_blocked = False
     phase = "TEST"  # TEST (init) -> READ -> PATCH -> TEST
 
     try:
@@ -664,8 +666,18 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
             start_global = time.time()
             last_chunk_time = start_global
             got_any_chunk = False
+            tool_called_this_turn = False
+            run_harness_called_this_turn = False
+            patch_attempted_this_turn = False
             # Sélection d'outils visibles selon la phase (réduction de choix = action)
+            # Si la lecture est bloquée, on force la phase PATCH (pour éviter 'aucun outil')
+            if phase == "READ" and read_phase_blocked:
+                phase = "PATCH"
+
             allowed_names = _allowed_names_for_phase(phase)
+            # Ceinture et bretelles : ne jamais passer une liste d’outils vide au modèle
+            if not allowed_names:
+                allowed_names = ["commit_intent", "simple_patch", "apply_edit_b64"]
             allowed_tools = _tools_by_name(allowed_names)
 
             stream = ollama.chat(
@@ -706,6 +718,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                             # car 'phase' a pu changer au tool_call précédent.
                             allowed_names = _allowed_names_for_phase(phase)
                             if phase == "PATCH" and consecutive_patch_idle >= 1:
+                                allowed_names = ["commit_intent", "simple_patch", "apply_edit_b64"]
+                            if not allowed_names:
                                 allowed_names = ["commit_intent", "simple_patch", "apply_edit_b64"]
                             name = tc["function"]["name"]
                             args = tc["function"].get("arguments", {}) or {}
@@ -762,6 +776,13 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                 continue
 
                             result = call_tool(name, args, read_limiter=limiter)
+                            tool_called_this_turn = True
+                            if name == "run_harness":
+                                run_harness_called_this_turn = True
+                            if name in {"simple_patch", "apply_edit_b64"}:
+                                patch_attempted_this_turn = True
+                                read_phase_blocked = False
+                                patch_idle_budget = 1
 
                             # 2) Pousser le résultat outillé AU MODÈLE
                             msgs.append({"role": "tool", "name": name, "content": json.dumps(result, ensure_ascii=False)})
@@ -782,7 +803,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                 if suggestion:
                                     msgs.append({"role": "user", "content": suggestion})
                                 # Après un test: prochaine phase = READ (nouvelle cible)
-                                phase = "READ"
+                                phase = "READ" if not read_phase_blocked else "PATCH"
                                 # Mémoriser l'état des patchs constaté à ce test
                                 last_test_patch_count = state.patches_applied
                                 consecutive_patch_idle = 0
@@ -815,6 +836,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     phase = "PATCH"
                                     msgs.append({"role": "user", "content":
                                         "PHASE=PATCH. Déclare commit_intent(path,target,change), puis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                                    msgs.append({"role": "user", "content": "OBLIGATOIRE: fais exactement UN tool call de patch maintenant (simple_patch ou apply_edit_b64). Pas de texte."})
                                 else:
                                     # Si READ_LIMIT ou autre erreur: pousser vers PATCH
                                     err = result.get("error", {})
@@ -830,10 +852,35 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     state.patches_applied += 1
                                     # Après patch appliqué, demander immédiatement le test
                                     phase = "TEST"
-                                    msgs.append({"role": "user", "content":
-                                        "Patch appliqué. Appelle maintenant run_harness (UN JSON une ligne)."})
+                                    should_auto_run = not run_harness_called_this_turn
+                                    if not should_auto_run:
+                                        msgs.append({"role": "user", "content":
+                                            "Patch appliqué. Appelle maintenant run_harness (UN JSON une ligne)."})
                                     # (last_test_patch_count < patches_applied) => run_harness autorisé au tour suivant
                                     consecutive_patch_idle = 0
+                                    if should_auto_run:
+                                        auto_result = call_tool("run_harness", {}, read_limiter=limiter)
+                                        tool_called_this_turn = True
+                                        run_harness_called_this_turn = True
+                                        msgs.append({"role": "tool", "name": "run_harness", "content": json.dumps(auto_result, ensure_ascii=False)})
+                                        payload = auto_result.get("result", {})
+                                        stdout = payload.get("stdout") or ""
+                                        stderr = payload.get("stderr") or ""
+                                        print("◀── HARNESS stdout:\n" + stdout[:4000])
+                                        if stderr.strip():
+                                            print("◀── HARNESS stderr:\n" + stderr[:4000])
+                                        print(f"◀── HARNESS returncode: {payload.get('returncode')}")
+                                        detected = detect_errors(stdout)
+                                        if detected:
+                                            state.record_errors(detected)
+                                        suggestion = analyze_harness_output(stdout)
+                                        if suggestion:
+                                            msgs.append({"role": "user", "content": suggestion})
+                                        phase = "READ" if not read_phase_blocked else "PATCH"
+                                        last_test_patch_count = state.patches_applied
+                                        consecutive_patch_idle = 0
+                                        state.lock_path = None
+                                        state.pending_intent = None
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -880,9 +927,13 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                         msgs.append({"role": "assistant", "content": assistant_text})
                     # Nudge ciblé selon la phase
                     if phase == "READ":
-                        msgs.append({"role": "user", "content":
-                            "PHASE=READ. Appelle read_file (≤2) si nécessaire, puis passe en PATCH: "
-                            "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                        if read_phase_blocked:
+                            msgs.append({"role": "user", "content":
+                                "PHASE=READ BLOQUÉE. Passe immédiatement en PATCH: COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                        else:
+                            msgs.append({"role": "user", "content":
+                                "PHASE=READ. Appelle read_file (≤2) si nécessaire, puis passe en PATCH: "
+                                "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
                     elif phase == "PATCH":
                         msgs.append({"role": "user", "content":
                             "PHASE=PATCH. Déclare commit_intent(path,target,change), puis PRODUIS le patch JSON sur une seule ligne."})
@@ -935,6 +986,14 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
 
             if not got_any_chunk:
                 print("[AGENT] Aucun chunk reçu de la part du modèle.")
+
+            if patch_attempted_this_turn:
+                patch_idle_budget = 1
+                read_phase_blocked = False
+            elif phase == "PATCH" and not tool_called_this_turn:
+                patch_idle_budget -= 1
+                if patch_idle_budget < 0:
+                    read_phase_blocked = True
 
         if VERBOSE:
             print("\n[END] Boucle terminée.")
