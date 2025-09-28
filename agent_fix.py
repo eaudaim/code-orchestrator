@@ -80,6 +80,9 @@ class AgentState:
     files_read: set = field(default_factory=set)
     errors_identified: List[str] = field(default_factory=list)
     patches_applied: int = 0
+    # Ajouts pour cadrer l’action
+    lock_path: Optional[str] = None          # dernier fichier lu à corriger
+    pending_intent: Optional[Dict] = None    # dernier commit_intent reçu
 
     def record_errors(self, errors: List[str]):
         for err in errors:
@@ -494,12 +497,23 @@ TOOLS = [
     }},
 ]
 
+# Tool virtuel d’engagement (pas d’effet sur fichiers)
+TOOLS.append({"type": "function", "function": {
+    "name": "commit_intent",
+    "description": "Déclarer l’intention de patch: sur quel fichier et quel changement (aucune écriture).",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string"},
+        "target": {"type": "string"},
+        "change": {"type": "string"}
+    }, "required": ["path", "target", "change"]}
+}})
+
 def _allowed_names_for_phase(phase: str) -> List[str]:
     if phase == "TEST":
         return ["run_harness"]
     if phase == "PATCH":
-        # En PATCH on force l'action: uniquement patch; test autorisé après patch (phase TEST)
-        return ["simple_patch", "apply_edit_b64"]
+        # En PATCH: engagement puis patch; test autorisé après patch (phase TEST)
+        return ["commit_intent", "simple_patch", "apply_edit_b64"]
     # READ par défaut
     return ["read_file"]  # volontairement sans list_files pour éviter l'évitement
 
@@ -608,6 +622,12 @@ def call_tool(name, args, read_limiter: Optional[ReadLimiter] = None):
         # --- Outils simples ---
         elif name == "list_files":
             return _ok(list_files())
+        elif name == "commit_intent":
+            # Validation minimale
+            if not isinstance(args.get("path"), str) or not isinstance(args.get("target"), str) or not isinstance(args.get("change"), str):
+                return _err("commit_intent", "SCHEMA_ERROR", "invalid arguments for commit_intent",
+                            expected={"path":"<str>","target":"<str>","change":"<str>"}, args=args)
+            return _ok({"accepted": True})
 
         elif name == "run_harness":
             res = run_harness()
@@ -630,6 +650,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
     limiter = ReadLimiter()
     # Compteur de patchs au dernier test, pour empêcher run_harness prématuré en PATCH
     last_test_patch_count = 0
+    # Inactivité PATCH (si besoin d’ajuster la fermeté)
+    consecutive_patch_idle = 0
     phase = "TEST"  # TEST (init) -> READ -> PATCH -> TEST
 
     try:
@@ -655,6 +677,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
             )
 
             # Boucle de streaming des chunks
+            timeout_reason: Optional[str] = None
             for chunk in stream:
                 now = time.time()
 
@@ -682,8 +705,27 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                             # IMPORTANT: recalculer les outils autorisés à CHAQUE tool_call,
                             # car 'phase' a pu changer au tool_call précédent.
                             allowed_names = _allowed_names_for_phase(phase)
+                            if phase == "PATCH" and consecutive_patch_idle >= 1:
+                                allowed_names = ["commit_intent", "simple_patch", "apply_edit_b64"]
                             name = tc["function"]["name"]
                             args = tc["function"].get("arguments", {}) or {}
+
+                            # Règles de verrou en PATCH (avant call_tool)
+                            if phase == "PATCH":
+                                if name in {"simple_patch", "apply_edit_b64"} and not state.pending_intent:
+                                    # exiger un engagement explicite avant de patcher
+                                    block = _err(name, "PHASE_BLOCK", "déclare d’abord ton intention via commit_intent(path,target,change)",
+                                                 expected={"allowed_tools": ["commit_intent"]}, args=args)
+                                    msgs.append({"role": "tool", "name": name, "content": json.dumps(block, ensure_ascii=False)})
+                                    msgs.append({"role": "user", "content": "PHASE=PATCH. Appelle d’abord commit_intent, puis applique le patch."})
+                                    continue
+                                if name in {"simple_patch", "apply_edit_b64"} and state.lock_path and args.get("path") and args.get("path") != state.lock_path:
+                                    # patch doit viser le dernier fichier lu
+                                    block = _err(name, "PHASE_BLOCK", f"patch doit cibler le dernier fichier lu: {state.lock_path}",
+                                                 expected={"path": state.lock_path}, args=args)
+                                    msgs.append({"role": "tool", "name": name, "content": json.dumps(block, ensure_ascii=False)})
+                                    msgs.append({"role": "user", "content": f"PHASE=PATCH. Corrige {state.lock_path} en priorité."})
+                                    continue
 
                             # 0) Filtrage dur par phase (bloque les outils non autorisés)
                             if name not in allowed_names:
@@ -696,8 +738,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                 # Nudge ciblé vers l'action attendue
                                 if phase == "PATCH":
                                     msgs.append({"role": "user", "content":
-                                        "PHASE=PATCH. STOP_REPEATING lectures. "
-                                        "Produis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                                        "PHASE=PATCH. Déclare commit_intent(path,target,change), puis PRODUIS le patch JSON sur une seule ligne."})
                                 elif phase == "TEST":
                                     msgs.append({"role": "user", "content":
                                         "PHASE=TEST. Appelle run_harness (UN JSON une ligne)."})
@@ -716,7 +757,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                              args=args)
                                 msgs.append({"role": "tool", "name": name, "content": json.dumps(block, ensure_ascii=False)})
                                 msgs.append({"role": "user", "content":
-                                    "PHASE=PATCH. Produis COMMIT + PATCH_SKETCH + PATCH(JSON). "
+                                    "PHASE=PATCH. Déclare commit_intent(path,target,change), puis COMMIT + PATCH_SKETCH + PATCH(JSON). "
                                     "Ensuite seulement, appelle run_harness."})
                                 continue
 
@@ -744,6 +785,16 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                 phase = "READ"
                                 # Mémoriser l'état des patchs constaté à ce test
                                 last_test_patch_count = state.patches_applied
+                                consecutive_patch_idle = 0
+                                state.lock_path = None
+                                state.pending_intent = None
+                            elif name == "commit_intent":
+                                # Mémoriser l’engagement
+                                state.pending_intent = {"path": args.get("path", ""),
+                                                        "target": args.get("target", ""),
+                                                        "change": args.get("change", "")}
+                                # Si le modèle s’écarte, on rappellera de patcher ce path
+                                msgs.append({"role": "user", "content": "INTENT_OK. Applique maintenant le patch puis teste."})
                             else:
                                 preview = json.dumps(result, ensure_ascii=False)
                                 if len(preview) > 1200:
@@ -756,10 +807,14 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     state.files_read.add(path)
                                 # Après une lecture réussie, on bascule en PATCH et on exige l'action
                                 if result.get("ok"):
+                                    if isinstance(path, str):
+                                        # Verrouiller la cible: ce fichier devient la priorité de patch
+                                        state.lock_path = path
+                                        state.pending_intent = None
+                                        consecutive_patch_idle = 0
                                     phase = "PATCH"
                                     msgs.append({"role": "user", "content":
-                                        "PHASE=PATCH. Produis maintenant: "
-                                        "COMMIT, PATCH_SKETCH, puis un PATCH(JSON) et un TEST(JSON) sur une seule ligne chacun."})
+                                        "PHASE=PATCH. Déclare commit_intent(path,target,change), puis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
                                 else:
                                     # Si READ_LIMIT ou autre erreur: pousser vers PATCH
                                     err = result.get("error", {})
@@ -767,7 +822,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                         phase = "PATCH"
                                         msgs.append({"role": "user", "content":
                                             "STOP_REPEATING. PHASE=PATCH. "
-                                            "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON). Pas d'autres lectures."})
+                                            "Déclare commit_intent(path,target,change), puis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON). Pas d'autres lectures."})
 
                             if name in {"simple_patch", "apply_edit_b64"} and result.get("ok"):
                                 payload = result.get("result") or {}
@@ -778,6 +833,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     msgs.append({"role": "user", "content":
                                         "Patch appliqué. Appelle maintenant run_harness (UN JSON une ligne)."})
                                     # (last_test_patch_count < patches_applied) => run_harness autorisé au tour suivant
+                                    consecutive_patch_idle = 0
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -829,8 +885,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                             "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
                     elif phase == "PATCH":
                         msgs.append({"role": "user", "content":
-                            "PHASE=PATCH. STOP_REPEATING lectures. "
-                            "Produis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                            "PHASE=PATCH. Déclare commit_intent(path,target,change), puis PRODUIS le patch JSON sur une seule ligne."})
+                        consecutive_patch_idle += 1
                     else:  # TEST
                         msgs.append({"role": "user", "content":
                             "PHASE=TEST. Appelle run_harness (UN JSON une ligne)."})
@@ -854,14 +910,28 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
 
                 # 4) Timeouts
                 if now - last_chunk_time > IDLE_TIMEOUT_SEC:
+                    timeout_reason = "IDLE"
                     print(f"\n[AGENT] Timeout inactivité ({IDLE_TIMEOUT_SEC}s). Tour suivant.")
                     break
                 if now - start_global > STREAM_TIMEOUT_SEC:
+                    timeout_reason = "STREAM"
                     print(f"\n[AGENT] Timeout global ({STREAM_TIMEOUT_SEC}s). Tour suivant.")
                     break
 
             else:
                 print("\n[WARN] stream ended without 'done'. Tour suivant.")
+
+            if timeout_reason:
+                if phase == "PATCH":
+                    consecutive_patch_idle += 1
+                    msgs.append({"role": "user", "content":
+                        "PHASE=PATCH. Silence prolongé détecté. Déclare commit_intent(path,target,change) puis applique le patch sur le fichier verrouillé."})
+                elif phase == "READ":
+                    msgs.append({"role": "user", "content":
+                        "PHASE=READ. Timeout sans action. Lis le fichier ciblé avec read_file (≤2) puis passe en PATCH."})
+                else:  # TEST
+                    msgs.append({"role": "user", "content":
+                        "PHASE=TEST. Timeout sans action. Exécute run_harness (UN JSON une ligne)."})
 
             if not got_any_chunk:
                 print("[AGENT] Aucun chunk reçu de la part du modèle.")
