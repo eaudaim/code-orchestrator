@@ -494,6 +494,15 @@ TOOLS = [
     }},
 ]
 
+def _tools_by_name(names: List[str]):
+    wanted = set(names)
+    out = []
+    for t in TOOLS:
+        fn = t.get("function", {}).get("name")
+        if fn in wanted:
+            out.append(t)
+    return out
+
 # ───────────────────────────────────────────────────────────────────────────────
 # FALLBACK : bloc EDIT texte si pas de tool call
 # ───────────────────────────────────────────────────────────────────────────────
@@ -604,11 +613,13 @@ def call_tool(name, args, read_limiter: Optional[ReadLimiter] = None):
 def main():
     msgs = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": "Commence par exécuter run_harness pour voir ce qui casse, puis corrige."}
+        {"role": "user", "content": """PHASE=TEST (initial) pour exécuter run_harness une fois, puis PHASE=READ → PATCH → TEST.
+Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."""}
     ]
 
     state = AgentState()
     limiter = ReadLimiter()
+    phase = "TEST"  # TEST (init) -> READ -> PATCH -> TEST
 
     try:
         for turn in range(MAX_TURNS):
@@ -620,10 +631,18 @@ def main():
             start_global = time.time()
             last_chunk_time = start_global
             got_any_chunk = False
+            # Sélection d'outils visibles selon la phase (réduction de choix = action)
+            if phase == "TEST":
+                allowed_tools = _tools_by_name(["run_harness"])
+            elif phase == "PATCH":
+                allowed_tools = _tools_by_name(["simple_patch", "apply_edit_b64", "run_harness"])
+            else:  # READ
+                allowed_tools = _tools_by_name(["read_file", "list_files"])
+
             stream = ollama.chat(
                 model=MODEL,
                 messages=msgs,
-                tools=TOOLS,
+                tools=allowed_tools,
                 stream=True,
                 options={"temperature": TEMPERATURE},
             )
@@ -677,6 +696,8 @@ def main():
                                 suggestion = analyze_harness_output(stdout)
                                 if suggestion:
                                     msgs.append({"role": "user", "content": suggestion})
+                                # Après un test: prochaine phase = READ (nouvelle cible)
+                                phase = "READ"
                             else:
                                 preview = json.dumps(result, ensure_ascii=False)
                                 if len(preview) > 1200:
@@ -687,11 +708,29 @@ def main():
                                 path = args.get("path")
                                 if isinstance(path, str):
                                     state.files_read.add(path)
+                                # Après une lecture réussie, on bascule en PATCH et on exige l'action
+                                if result.get("ok"):
+                                    phase = "PATCH"
+                                    msgs.append({"role": "user", "content":
+                                        "PHASE=PATCH. Produis maintenant: "
+                                        "COMMIT, PATCH_SKETCH, puis un PATCH(JSON) et un TEST(JSON) sur une seule ligne chacun."})
+                                else:
+                                    # Si READ_LIMIT ou autre erreur: pousser vers PATCH
+                                    err = result.get("error", {})
+                                    if err and err.get("code") == "READ_LIMIT":
+                                        phase = "PATCH"
+                                        msgs.append({"role": "user", "content":
+                                            "STOP_REPEATING. PHASE=PATCH. "
+                                            "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON). Pas d'autres lectures."})
 
                             if name == "simple_patch" and result.get("ok"):
                                 payload = result.get("result") or {}
                                 if payload.get("applied"):
                                     state.patches_applied += 1
+                                    # Après patch appliqué, demander immédiatement le test
+                                    phase = "TEST"
+                                    msgs.append({"role": "user", "content":
+                                        "Patch appliqué. Appelle maintenant run_harness (UN JSON une ligne)."})
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -735,8 +774,18 @@ def main():
                     # Sinon, pousser la réponse + nudge vers outils
                     if assistant_text:
                         msgs.append({"role": "assistant", "content": assistant_text})
-                    msgs.append({"role": "user",
-                                 "content": "Aucun outil appelé. Appelle `simple_patch`, `apply_edit_b64`, `read_file` ou `run_harness` maintenant."})
+                    # Nudge ciblé selon la phase
+                    if phase == "READ":
+                        msgs.append({"role": "user", "content":
+                            "PHASE=READ. Appelle read_file (≤2) si nécessaire, puis passe en PATCH: "
+                            "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                    elif phase == "PATCH":
+                        msgs.append({"role": "user", "content":
+                            "PHASE=PATCH. STOP_REPEATING lectures. "
+                            "Produis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                    else:  # TEST
+                        msgs.append({"role": "user", "content":
+                            "PHASE=TEST. Appelle run_harness (UN JSON une ligne)."})
                     break
 
                 # 2) Flux de texte normal (rare avec GPT-OSS)
