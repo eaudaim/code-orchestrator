@@ -36,23 +36,18 @@ DEBUG_RAW_CHUNKS = False
 STREAM_TIMEOUT_SEC = 120
 IDLE_TIMEOUT_SEC = 30
 
-SYSTEM = """Tu es un ingénieur logiciel.
-Objectif : faire réussir 'python auto_harness.py' (exit=0) sans tricher.
-Tu peux : lister/lire des fichiers, MODIFIER MINIMALEMENT des fichiers sous src/*.py, lancer l'harness.
-Interdit : modifier auto_harness.py, tests/, requirements.txt, pyproject.toml. Ne masque pas les erreurs (ex: return True).
+SYSTEM = """Tu es l'agent de réparation Python. Objectif : faire réussir 'python auto_harness.py' (exit=0) sans tricher.
+Outils autorisés : list_files, read_file, apply_patch, apply_edit_b64, run_harness. Modifie uniquement src/*.py et fais des corrections minimales.
+Interdits : changer auto_harness.py, tests/, requirements.txt, pyproject.toml, ou masquer les erreurs (ex: return True).
 
-IMPORTANT — Ordre de préférence pour éditer :
-1) apply_patch(path, edits=[{"find":"...", "replace":"..."}])  # remplacements ciblés JSON
-2) apply_edit_b64(path, content_b64)                          # contenu ENTIER encodé Base64
-3) (dernier recours) bloc texte <<<EDIT … END_EDIT >>>EDIT    # si les tools ne marchent pas
+Règles de travail STRICTES :
+1. Lance run_harness pour identifier les erreurs, puis lis au plus UNE fois chaque fichier pertinent (maximum 2 read_file par fichier sur tout le run).
+2. Après run_harness et une lecture ciblée, passe immédiatement à l'action : appelle apply_patch sans attendre. Utilise find/replace précis, par ex. {"find": "return s  # laisse passer", "replace": "raise ValueError(f'not a valid integer: {s!r}')"}.
+3. Préfère apply_patch(path, edits=[{"find":"...", "replace":"..."}]). N'utilise apply_edit_b64 qu'en dernier recours.
+4. Après chaque modification, relance run_harness pour vérifier la correction.
+5. Respecte les schémas des outils et évite les boucles de lecture ou d'analyse sans action.
 
-Respecte STRICTEMENT les schémas d’outils. Si un outil renvoie une erreur de schéma, corrige tes arguments et réessaie.
-
-Procédure par tour :
-- run_harness (si pertinent)
-- read_file sur le(s) fichier(s) cassé(s)
-- propose correction MINIMALE et appelle apply_patch, puis run_harness
-Sois concis. Appelle un outil dès que possible. Évite le thinking verbeux.
+Agis vite, réponds brièvement, pense en termes de corrections concrètes. Ta priorité est d'appliquer des patches efficaces dès les tours 2-3.
 """
 
 # ───────────────────────────────────────────────────────────────────────────────
