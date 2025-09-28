@@ -88,7 +88,35 @@ def run(cmd, timeout=90, env=None):
     }
 
 def list_files():
-    return {"files": [str(p.relative_to(PROJECT_DIR)) for p in PROJECT_DIR.rglob("*.py")]}
+    excluded_exact = {
+        ".git",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        "venv",
+        "env",
+        "site-packages",
+        "__pycache__",
+        "build",
+        "dist",
+    }
+    excluded_prefixes = (".venv",)
+    files = []
+    for root, dirs, filenames in os.walk(PROJECT_DIR):
+        pruned_dirs = []
+        for d in dirs:
+            if any(d.startswith(prefix) for prefix in excluded_prefixes):
+                continue
+            if d in excluded_exact:
+                continue
+            pruned_dirs.append(d)
+        dirs[:] = pruned_dirs
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            full_path = Path(root) / filename
+            files.append(str(full_path.relative_to(PROJECT_DIR)))
+    return {"files": files}
 
 def read_file(path: str):
     fp = (PROJECT_DIR / path).resolve()
@@ -170,17 +198,21 @@ def apply_patch(path: str, edits: list):
 
     original = fp.read_text(encoding="utf-8", errors="ignore")
 
-    if not isinstance(edits, list) or not edits:
-        return {"error": "edits must be a non-empty list"}
+    if not isinstance(edits, list):
+        return {"error": "invalid_edits_type", "message": "edits must be a list"}
+    if not edits:
+        return {"error": "empty_edits", "message": "edits cannot be empty"}
 
     normalized = []
-    for e in edits:
+    for idx, e in enumerate(edits):
         if not isinstance(e, dict):
-            return {"error": "edits must be a non-empty list"}
+            return {"error": "invalid_edit_item", "index": idx, "message": "each edit must be an object"}
         find = e.get("find")
+        if not isinstance(find, str):
+            return {"error": "invalid_find", "index": idx, "message": "'find' must be a string"}
         replace = e.get("replace", "")
-        if not isinstance(find, str) or not isinstance(replace, str):
-            return {"error": "edits must be a non-empty list"}
+        if not isinstance(replace, str):
+            return {"error": "invalid_replace", "index": idx, "message": "'replace' must be a string"}
         normalized.append((find, replace))
 
     updated = original
@@ -204,9 +236,48 @@ def apply_patch(path: str, edits: list):
         "diff_preview": _make_unified_diff(original, updated, path)
     }
 
+def analyze_harness_output(text: str) -> str:
+    """
+    Transforme la sortie de l'harness en suggestions actionnables pour le modèle.
+    """
+    hints = []
+
+    # utils.to_int — doit lever ValueError si non entier
+    if re.search(r"src\.numops\.utils\.to_int", text) and "ValueError" in text and "Got:\n    'x'" in text:
+        hints.append("Dans src/numops/utils.py -> to_int(s): après strip, si s n’est pas un entier décimal, lever ValueError (ne pas retourner s).")
+
+    # utils.merge_dicts — attend somme sur clés communes
+    if re.search(r"src\.numops\.utils\.merge_dicts", text) and '== {"a": 1, "b": 5, "c": 4}' in text:
+        hints.append("Dans src/numops/utils.py -> merge_dicts(a,b): fusionner en additionnant les valeurs des clés communes (pas simple override {**a, **b}).")
+
+    # utils.append_item — défaut de liste mutable
+    if re.search(r"src\.numops\.utils\.append_item", text) and "Expected:\n    ['b']" in text:
+        hints.append("Dans src/numops/utils.py -> append_item: paramètre par défaut doit être None et créer une nouvelle liste si None (pas bucket = []).")
+
+    # stats.mean — division entière //
+    if re.search(r"src\.numops\.stats\.mean", text) and "Expected:\n    0.2" in text and "Got:\n    0.0" in text:
+        hints.append("Dans src/numops/stats.py -> mean: utiliser une division flottante sum(values) / len(values), pas //.")
+
+    # stats.median — pair: moyenne des deux du milieu
+    if re.search(r"src\.numops\.stats\.median", text) and "median([1, 2, 3, 4])" in text and "Expected:\n    2.5" in text:
+        hints.append("Dans src/numops/stats.py -> median: si n est pair, renvoyer la moyenne (vals[mid-1] + vals[mid]) / 2.")
+
+    # core.running_total — ne pas préfixer par 0
+    if re.search(r"src\.numops\.core\.running_total", text) and "Expected:\n    [1, 3, 6]" in text and "Got:\n    [0, 1, 3, 6]" in text:
+        hints.append("Dans src/numops/core.py -> running_total: accumuler puis append le cumul (ne pas préfixer par 0).")
+
+    # mypy CLI types
+    if 'mypy' in text and 'src/numops/cli.py' in text and 'mean(arr)' in text:
+        hints.append("Dans src/numops/cli.py: typer ou séparer arr_i (int) pour runtotal et arr_f (float) pour mean pour satisfaire mypy.")
+
+    if not hints:
+        return ""
+    return "Voici des corrections ciblées à effectuer avec apply_patch (find→replace) ou apply_edit_b64 :\n- " + "\n- ".join(hints)
+
+
 def run_harness():
-    # S’assure que la CLI --help voit src/ (PYTHONPATH)
-    env = dict(os.environ, PYTHONPATH=str(PROJECT_DIR))
+    # S’assure que la CLI --help voit le package 'numops' sous src/
+    env = dict(os.environ, PYTHONPATH=str(PROJECT_DIR / "src"))
     return run([sys.executable, "auto_harness.py"], env=env)
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -427,6 +498,9 @@ def main():
                                 if stderr.strip():
                                     print("◀── HARNESS stderr:\n" + stderr[:4000])
                                 print(f"◀── HARNESS returncode: {payload.get('returncode')}")
+                                suggestion = analyze_harness_output(stdout)
+                                if suggestion:
+                                    msgs.append({"role": "user", "content": suggestion})
                             else:
                                 preview = json.dumps(result, ensure_ascii=False)
                                 if len(preview) > 1200:
