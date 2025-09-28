@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# agent_fix.py — Agent local “réparateur” pour projet Python (GPT-OSS)
+# agent_fix.py — Agent local "réparateur" pour projet Python (GPT-OSS)
 # - Streaming + logs + timeouts
 # - Outils : list_files, read_file, apply_patch (find→replace), apply_edit_b64, run_harness
-# - Enveloppes d’erreurs {"ok": true/false} pour TOUS les tools
-# - Feedback d’erreur au modèle + anti-répétition d’appels invalides
+# - Enveloppes d'erreurs {"ok": true/false} pour TOUS les tools
+# - Feedback d'erreur au modèle + anti-répétition d'appels invalides
 # - Conçu pour bosser avec auto_harness.py agrégé
 
 import ast
@@ -28,7 +28,7 @@ PROJECT_DIR = Path(".").resolve()
 SRC_DIR = PROJECT_DIR / "src"
 
 VERBOSE = True
-SHOW_THINK = False       # coupe l’affichage verbeux du "thinking"
+SHOW_THINK = False       # coupe l'affichage verbeux du "thinking"
 TEMPERATURE = 0.2
 MAX_TURNS = 8
 
@@ -37,13 +37,13 @@ STREAM_TIMEOUT_SEC = 120
 IDLE_TIMEOUT_SEC = 30
 
 SYSTEM = """Tu es l'agent de réparation Python. Objectif : faire réussir 'python auto_harness.py' (exit=0) sans tricher.
-Outils autorisés : list_files, read_file, apply_patch, apply_edit_b64, run_harness. Modifie uniquement src/*.py et fais des corrections minimales.
+Outils autorisés : list_files, read_file, simple_patch, apply_edit_b64, run_harness. Modifie uniquement src/*.py et fais des corrections minimales.
 Interdits : changer auto_harness.py, tests/, requirements.txt, pyproject.toml, ou masquer les erreurs (ex: return True).
 
 Règles de travail STRICTES :
 1. Lance run_harness pour identifier les erreurs, puis lis au plus UNE fois chaque fichier pertinent (maximum 2 read_file par fichier sur tout le run).
-2. Après run_harness et une lecture ciblée, passe immédiatement à l'action : appelle apply_patch sans attendre. Utilise find/replace précis, par ex. {"find": "return s  # laisse passer", "replace": "raise ValueError(f'not a valid integer: {s!r}')"}.
-3. Préfère apply_patch(path, edits=[{"find":"...", "replace":"..."}]). N'utilise apply_edit_b64 qu'en dernier recours.
+2. Après run_harness et une lecture ciblée, passe immédiatement à l'action : appelle simple_patch sans attendre. Utilise find/replace précis, par ex. simple_patch("src/numops/utils.py", "return s  # laisse passer", "raise ValueError(f'not a valid integer: {s!r}')").
+3. Préfère simple_patch(path, find, replace). N'utilise apply_edit_b64 qu'en dernier recours.
 4. Après chaque modification, relance run_harness pour vérifier la correction.
 5. Respecte les schémas des outils et évite les boucles de lecture ou d'analyse sans action.
 
@@ -239,7 +239,7 @@ def analyze_harness_output(text: str) -> str:
 
     # utils.to_int — doit lever ValueError si non entier
     if re.search(r"src\.numops\.utils\.to_int", text) and "ValueError" in text and "Got:\n    'x'" in text:
-        hints.append("Dans src/numops/utils.py -> to_int(s): après strip, si s n’est pas un entier décimal, lever ValueError (ne pas retourner s).")
+        hints.append("Dans src/numops/utils.py -> to_int(s): après strip, si s n'est pas un entier décimal, lever ValueError (ne pas retourner s).")
 
     # utils.merge_dicts — attend somme sur clés communes
     if re.search(r"src\.numops\.utils\.merge_dicts", text) and '== {"a": 1, "b": 5, "c": 4}' in text:
@@ -267,11 +267,11 @@ def analyze_harness_output(text: str) -> str:
 
     if not hints:
         return ""
-    return "Voici des corrections ciblées à effectuer avec apply_patch (find→replace) ou apply_edit_b64 :\n- " + "\n- ".join(hints)
+    return "Voici des corrections ciblées à effectuer avec simple_patch (find→replace) ou apply_edit_b64 :\n- " + "\n- ".join(hints)
 
 
 def run_harness():
-    # S’assure que la CLI --help voit le package 'numops' sous src/
+    # S'assure que la CLI --help voit le package 'numops' sous src/
     env = dict(os.environ, PYTHONPATH=str(PROJECT_DIR / "src"))
     return run([sys.executable, "auto_harness.py"], env=env)
 
@@ -292,24 +292,17 @@ TOOLS = [
                        "required": ["path"]}
     }},
     {"type": "function", "function": {
-        "name": "apply_patch",
-        "description": "Appliquer des remplacements ciblés (find→replace) sur un fichier sous src/",
-        "parameters": {"type": "object",
-                       "properties": {
-                           "path": {"type": "string"},
-                           "edits": {
-                               "type": "array",
-                               "items": {
-                                   "type": "object",
-                                   "properties": {
-                                       "find": {"type": "string"},
-                                       "replace": {"type": "string"}
-                                   },
-                                   "required": ["find"]
-                               }
-                           }
-                       },
-                       "required": ["path", "edits"]}
+        "name": "simple_patch",
+        "description": "Apply one find/replace",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "find": {"type": "string"}, 
+                "replace": {"type": "string"}
+            },
+            "required": ["path", "find", "replace"]
+        }
     }},
     {"type": "function", "function": {
         "name": "apply_edit_b64",
@@ -374,26 +367,18 @@ def call_tool(name, args):
             res = read_file(path=path)
             return _ok(res)
 
-        elif name == "apply_patch":
+        elif name == "simple_patch":
             path = args.get("path")
-            edits = args.get("edits")
-            if not isinstance(path, str) or not isinstance(edits, list):
-                return _err("apply_patch", "SCHEMA_ERROR",
-                            "invalid arguments for apply_patch",
-                            expected={"path":"<str>",
-                                      "edits":"[{find:<str>, replace:<str>}]"},
+            find = args.get("find")
+            replace = args.get("replace")
+            if not isinstance(path, str) or not isinstance(find, str) or not isinstance(replace, str):
+                return _err("simple_patch", "SCHEMA_ERROR",
+                            "invalid arguments for simple_patch",
+                            expected={"path":"<str>", "find":"<str>", "replace":"<str>"},
                             args=args)
-            clean = []
-            for e in edits:
-                if not isinstance(e, dict):
-                    continue
-                f = e.get("find")
-                r = e.get("replace", "")
-                if isinstance(f, str) and isinstance(r, str):
-                    clean.append({"find": f, "replace": r})
-            if not clean:
-                return _err("apply_patch", "SCHEMA_ERROR", "no valid edits", args=args)
-            res = apply_patch(path=path, edits=clean)
+            # Convertir en format edits pour apply_patch
+            edits = [{"find": find, "replace": replace}]
+            res = apply_patch(path=path, edits=edits)
             return _ok(res)
 
         elif name == "apply_edit_b64":
@@ -478,7 +463,7 @@ def main():
                             name = tc["function"]["name"]
                             args = tc["function"].get("arguments", {}) or {}
 
-                            # 1) Exécuter l’outil (avec enveloppe ok/err)
+                            # 1) Exécuter l'outil (avec enveloppe ok/err)
                             result = call_tool(name, args)
 
                             # 2) Pousser le résultat outillé AU MODÈLE
@@ -507,7 +492,7 @@ def main():
                             if not result.get("ok"):
                                 _last_bad_calls[key] = _last_bad_calls.get(key, 0) + 1
 
-                                # a) informer le modèle de l’erreur + schéma attendu
+                                # a) informer le modèle de l'erreur + schéma attendu
                                 err = result["error"]
                                 msgs.append({"role":"user","content":(
                                     f"Tool error: {err['tool']} ({err['code']}). "
@@ -541,7 +526,7 @@ def main():
                     if assistant_text:
                         msgs.append({"role": "assistant", "content": assistant_text})
                     msgs.append({"role": "user",
-                                 "content": "Aucun outil appelé. Appelle `apply_patch`, `apply_edit_b64`, `read_file` ou `run_harness` maintenant."})
+                                 "content": "Aucun outil appelé. Appelle `simple_patch`, `apply_edit_b64`, `read_file` ou `run_harness` maintenant."})
                     break
 
                 # 2) Flux de texte normal (rare avec GPT-OSS)
@@ -585,4 +570,3 @@ def main():
 # ───────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
-
