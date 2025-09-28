@@ -6,6 +6,7 @@
 # - Feedback d’erreur au modèle + anti-répétition d’appels invalides
 # - Conçu pour bosser avec auto_harness.py agrégé
 
+import ast
 import base64
 import difflib
 import json
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Tuple
 
 import ollama
 
@@ -115,10 +117,26 @@ def _write_src_file(path: str, content: str):
 def apply_edit_b64(path: str, content_b64: str):
     """Remplace entièrement un fichier sous src/ avec contenu en Base64 (JSON-safe)."""
     try:
-        raw = base64.b64decode(content_b64.encode("ascii"), validate=True).decode("utf-8", errors="strict")
+        raw_bytes = base64.b64decode(content_b64.encode("ascii"), validate=True)
+        raw = raw_bytes.decode("utf-8", errors="strict")
     except Exception as e:
         return {"error": f"base64 decode failed: {e}"}
-    return _write_src_file(path, raw)
+
+    fp, err = _guard_src_py(path)
+    if err:
+        return err
+
+    original = ""
+    if fp.exists():
+        original = fp.read_text(encoding="utf-8", errors="ignore")
+
+    ok, detail = _check_python_syntax(raw, path)
+    if not ok:
+        return {"error": "syntax_error", "detail": detail, "path": path}
+
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(raw, encoding="utf-8")
+    return {"applied": [path], "diff_preview": _make_unified_diff(original, raw, path)}
 
 def _make_unified_diff(old: str, new: str, path: str):
     diff = difflib.unified_diff(
@@ -128,6 +146,15 @@ def _make_unified_diff(old: str, new: str, path: str):
     )
     preview = "".join(list(diff))[:4000]
     return preview
+
+
+def _check_python_syntax(text: str, path_label: str) -> Tuple[bool, str]:
+    try:
+        ast.parse(text, filename=path_label)
+        return True, "syntax ok"
+    except SyntaxError as e:
+        loc = f"{getattr(e, 'filename', path_label)}:{getattr(e, 'lineno', '?')}:{getattr(e, 'offset', '?')}"
+        return False, f"SyntaxError at {loc}: {e.msg}"
 
 def apply_patch(path: str, edits: list):
     """
@@ -140,18 +167,37 @@ def apply_patch(path: str, edits: list):
         return err
     if not fp.exists():
         return {"error": f"file not found: {path}"}
+
     original = fp.read_text(encoding="utf-8", errors="ignore")
-    updated = original
+
     if not isinstance(edits, list) or not edits:
         return {"error": "edits must be a non-empty list"}
+
+    normalized = []
     for e in edits:
-        f = e.get("find")
-        r = e.get("replace", "")
-        if f is None:
-            return {"error": "each edit needs 'find'"}
-        updated = updated.replace(f, r)
-    if updated == original:
+        if not isinstance(e, dict):
+            return {"error": "edits must be a non-empty list"}
+        find = e.get("find")
+        replace = e.get("replace", "")
+        if not isinstance(find, str) or not isinstance(replace, str):
+            return {"error": "edits must be a non-empty list"}
+        normalized.append((find, replace))
+
+    updated = original
+    applied_count = 0
+    for find, replace in normalized:
+        occurrences = updated.count(find)
+        if occurrences:
+            applied_count += occurrences
+        updated = updated.replace(find, replace)
+
+    if applied_count == 0:
         return {"warning": "no changes applied (find strings not found?)"}
+
+    ok, detail = _check_python_syntax(updated, path)
+    if not ok:
+        return {"error": "syntax_error", "detail": detail, "path": path}
+
     fp.write_text(updated, encoding="utf-8")
     return {
         "applied": [path],
