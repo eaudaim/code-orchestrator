@@ -63,6 +63,7 @@ def run_doctests():
     import doctest
     failures = 0; tried = 0
     sys.path.insert(0, str(PROJECT))
+    per_file_failures = {}
     for p in SRC.rglob("*.py"):
         mod_path = p.relative_to(PROJECT).with_suffix("")
         mod_name = ".".join(mod_path.parts)
@@ -71,12 +72,24 @@ def run_doctests():
             tried += 1
             f, _ = doctest.testmod(m, verbose=False, optionflags=doctest.ELLIPSIS)
             failures += f
+            if f:
+                key = p.name
+                per_file_failures[key] = per_file_failures.get(key, 0) + f
         except Exception as e:
             failures += 1
             print(f"[DOCTEST ERROR] {mod_name} -> {e}")
+            key = p.name
+            per_file_failures[key] = per_file_failures.get(key, 0) + 1
     msg = f"[DOCTEST] tried={tried} failures={failures}"
+    if per_file_failures:
+        breakdown = ", ".join(f"{name}: {count}" for name, count in sorted(per_file_failures.items()))
+        msg += f" | breakdown: {breakdown}"
     print(msg)
-    return {"status": "PASS" if failures == 0 else "FAIL", "detail": msg}
+    return {
+        "status": "PASS" if failures == 0 else "FAIL",
+        "detail": msg,
+        "failures": per_file_failures,
+    }
 
 # ───────────────────────── CLI --help (si détectable) ─────────────────────────
 def detect_top_package():
@@ -179,7 +192,86 @@ def run_mypy_tolerant():
     ])
     out = rc["stdout"] or rc["stderr"]
     print(out)
-    return {"status": "PASS" if rc["returncode"] == 0 else "FAIL", "detail": out}
+    per_file_errors = {}
+    if rc["returncode"] != 0:
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if "error:" not in line:
+                continue
+            if line.count(":") < 2:
+                continue
+            m = re.match(r"(?P<path>.+?):(\d+):\s*error:", line)
+            if not m:
+                continue
+            path_text = m.group("path").strip()
+            if not path_text:
+                continue
+            candidate = pathlib.Path(path_text)
+            if not candidate.exists():
+                possible = (PROJECT / path_text).resolve()
+                if possible.exists():
+                    candidate = possible
+            key = candidate.name if candidate.exists() else pathlib.Path(path_text).name
+            per_file_errors[key] = per_file_errors.get(key, 0) + 1
+    return {
+        "status": "PASS" if rc["returncode"] == 0 else "FAIL",
+        "detail": out,
+        "errors": per_file_errors,
+    }
+
+
+def _parse_breakdown(detail: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not detail:
+        return counts
+    m = re.search(r"breakdown:\s*(.+)", detail)
+    if not m:
+        return counts
+    tail = m.group(1)
+    for chunk in tail.split(","):
+        name, _, count = chunk.partition(":")
+        name = name.strip()
+        count = count.strip()
+        if not name or not count:
+            continue
+        try:
+            counts[name] = counts.get(name, 0) + int(count)
+        except ValueError:
+            continue
+    return counts
+
+
+def count_errors(results):
+    doctest_counts: Dict[str, int] = {}
+    mypy_counts: Dict[str, int] = {}
+    doctest_total = 0
+    mypy_total = 0
+
+    for name, res in results:
+        if name == "doctest":
+            breakdown = {}
+            if isinstance(res, dict):
+                breakdown = res.get("failures") or {}
+                if not breakdown:
+                    breakdown = _parse_breakdown(res.get("detail", ""))
+            for fname, qty in breakdown.items():
+                doctest_counts[fname] = doctest_counts.get(fname, 0) + qty
+                doctest_total += qty
+        elif name == "mypy":
+            breakdown = {}
+            if isinstance(res, dict):
+                breakdown = res.get("errors") or {}
+                if not breakdown:
+                    breakdown = _parse_breakdown(res.get("detail", ""))
+            for fname, qty in breakdown.items():
+                mypy_counts[fname] = mypy_counts.get(fname, 0) + qty
+                mypy_total += qty
+
+    return {
+        "doctest": {"total": doctest_total, "per_file": doctest_counts},
+        "mypy": {"total": mypy_total, "per_file": mypy_counts},
+        "total": doctest_total + mypy_total,
+    }
 
 # ───────────────────────── Main (agrégé) ─────────────────────────
 def main():
@@ -211,6 +303,33 @@ def main():
         if status == "FAIL":
             any_fail = True
         print(f"{name:10s} : {status}")
+
+    counts = count_errors(results)
+    print("\n" + "=" * 70)
+    print("DÉCOMPTE DES ERREURS")
+    print("=" * 70)
+
+    doctest_total = counts["doctest"]["total"]
+    doctest_label = "erreur" if doctest_total == 1 else "erreurs"
+    doctest_breakdown = counts["doctest"]["per_file"]
+    if doctest_breakdown:
+        parts = ", ".join(f"{name}: {count}" for name, count in sorted(doctest_breakdown.items()))
+        print(f"Doctests: {doctest_total} {doctest_label} ({parts})")
+    else:
+        print(f"Doctests: {doctest_total} {doctest_label}")
+
+    mypy_total = counts["mypy"]["total"]
+    mypy_label = "erreur" if mypy_total == 1 else "erreurs"
+    mypy_breakdown = counts["mypy"]["per_file"]
+    if mypy_breakdown:
+        parts = ", ".join(f"{name}: {count}" for name, count in sorted(mypy_breakdown.items()))
+        print(f"Mypy: {mypy_total} {mypy_label} ({parts})")
+    else:
+        print(f"Mypy: {mypy_total} {mypy_label}")
+
+    total_errors = counts["total"]
+    total_label = "erreur détectée" if total_errors == 1 else "erreurs détectées"
+    print(f"TOTAL: {total_errors} {total_label}")
 
     # Code de sortie : 0 si tout PASS ou SKIPPED ; 1 si au moins un FAIL
     sys.exit(1 if any_fail else 0)
