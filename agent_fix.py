@@ -494,6 +494,15 @@ TOOLS = [
     }},
 ]
 
+def _allowed_names_for_phase(phase: str) -> List[str]:
+    if phase == "TEST":
+        return ["run_harness"]
+    if phase == "PATCH":
+        # En PATCH on force l'action: uniquement patch; test autorisé après patch (phase TEST)
+        return ["simple_patch", "apply_edit_b64"]
+    # READ par défaut
+    return ["read_file"]  # volontairement sans list_files pour éviter l'évitement
+
 def _tools_by_name(names: List[str]):
     wanted = set(names)
     out = []
@@ -619,6 +628,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
 
     state = AgentState()
     limiter = ReadLimiter()
+    # Compteur de patchs au dernier test, pour empêcher run_harness prématuré en PATCH
+    last_test_patch_count = 0
     phase = "TEST"  # TEST (init) -> READ -> PATCH -> TEST
 
     try:
@@ -632,12 +643,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
             last_chunk_time = start_global
             got_any_chunk = False
             # Sélection d'outils visibles selon la phase (réduction de choix = action)
-            if phase == "TEST":
-                allowed_tools = _tools_by_name(["run_harness"])
-            elif phase == "PATCH":
-                allowed_tools = _tools_by_name(["simple_patch", "apply_edit_b64", "run_harness"])
-            else:  # READ
-                allowed_tools = _tools_by_name(["read_file", "list_files"])
+            allowed_names = _allowed_names_for_phase(phase)
+            allowed_tools = _tools_by_name(allowed_names)
 
             stream = ollama.chat(
                 model=MODEL,
@@ -672,10 +679,47 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                     if tool_calls:
                         # Exécuter chaque tool call
                         for tc in tool_calls:
+                            # IMPORTANT: recalculer les outils autorisés à CHAQUE tool_call,
+                            # car 'phase' a pu changer au tool_call précédent.
+                            allowed_names = _allowed_names_for_phase(phase)
                             name = tc["function"]["name"]
                             args = tc["function"].get("arguments", {}) or {}
 
+                            # 0) Filtrage dur par phase (bloque les outils non autorisés)
+                            if name not in allowed_names:
+                                print(f"◀── PHASE_BLOCK: '{name}' interdit en phase {phase}")
+                                # Retourner une erreur outillée au modèle
+                                block = _err(name, "PHASE_BLOCK",
+                                             f"'{name}' non autorisé en phase {phase}",
+                                             expected={"allowed_tools": allowed_names}, args=args)
+                                msgs.append({"role": "tool", "name": name, "content": json.dumps(block, ensure_ascii=False)})
+                                # Nudge ciblé vers l'action attendue
+                                if phase == "PATCH":
+                                    msgs.append({"role": "user", "content":
+                                        "PHASE=PATCH. STOP_REPEATING lectures. "
+                                        "Produis COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON)."})
+                                elif phase == "TEST":
+                                    msgs.append({"role": "user", "content":
+                                        "PHASE=TEST. Appelle run_harness (UN JSON une ligne)."})
+                                else:
+                                    msgs.append({"role": "user", "content":
+                                        "PHASE=READ. Appelle read_file (≤2) puis passe en PATCH."})
+                                # On n'exécute pas le tool non autorisé
+                                continue
+
                             # 1) Exécuter l'outil (avec enveloppe ok/err)
+                            if name == "run_harness" and phase == "PATCH" and state.patches_applied == last_test_patch_count:
+                                print("◀── PHASE_BLOCK: 'run_harness' interdit en PATCH sans patch préalable")
+                                block = _err(name, "PHASE_BLOCK",
+                                             "run_harness non autorisé: applique un patch d'abord",
+                                             expected={"allowed_tools": _allowed_names_for_phase("PATCH")},
+                                             args=args)
+                                msgs.append({"role": "tool", "name": name, "content": json.dumps(block, ensure_ascii=False)})
+                                msgs.append({"role": "user", "content":
+                                    "PHASE=PATCH. Produis COMMIT + PATCH_SKETCH + PATCH(JSON). "
+                                    "Ensuite seulement, appelle run_harness."})
+                                continue
+
                             result = call_tool(name, args, read_limiter=limiter)
 
                             # 2) Pousser le résultat outillé AU MODÈLE
@@ -698,6 +742,8 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     msgs.append({"role": "user", "content": suggestion})
                                 # Après un test: prochaine phase = READ (nouvelle cible)
                                 phase = "READ"
+                                # Mémoriser l'état des patchs constaté à ce test
+                                last_test_patch_count = state.patches_applied
                             else:
                                 preview = json.dumps(result, ensure_ascii=False)
                                 if len(preview) > 1200:
@@ -723,7 +769,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                             "STOP_REPEATING. PHASE=PATCH. "
                                             "COMMIT + PATCH_SKETCH + PATCH(JSON) + TEST(JSON). Pas d'autres lectures."})
 
-                            if name == "simple_patch" and result.get("ok"):
+                            if name in {"simple_patch", "apply_edit_b64"} and result.get("ok"):
                                 payload = result.get("result") or {}
                                 if payload.get("applied"):
                                     state.patches_applied += 1
@@ -731,6 +777,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                                     phase = "TEST"
                                     msgs.append({"role": "user", "content":
                                         "Patch appliqué. Appelle maintenant run_harness (UN JSON une ligne)."})
+                                    # (last_test_patch_count < patches_applied) => run_harness autorisé au tour suivant
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -769,6 +816,7 @@ Appelle run_harness (JSON une ligne). Ensuite: READ ≤2 fichiers, puis COMMIT +
                         if detected:
                             state.record_errors(detected)
                         msgs.append({"role": "tool", "name": "run_harness", "content": json.dumps(_ok(res))})
+                        last_test_patch_count = state.patches_applied
                         break
 
                     # Sinon, pousser la réponse + nudge vers outils
