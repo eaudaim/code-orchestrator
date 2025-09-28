@@ -17,7 +17,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import ollama
 
@@ -31,7 +32,7 @@ SRC_DIR = PROJECT_DIR / "src"
 VERBOSE = True
 SHOW_THINK = False       # coupe l'affichage verbeux du "thinking"
 TEMPERATURE = 0.2
-MAX_TURNS = 8
+MAX_TURNS = 12
 
 DEBUG_RAW_CHUNKS = False
 STREAM_TIMEOUT_SEC = 120
@@ -79,14 +80,162 @@ class AgentState:
     files_read: set = field(default_factory=set)
     errors_identified: List[str] = field(default_factory=list)
     patches_applied: int = 0
-    turns_without_patch: int = 0
-    read_only_turns: int = 0
-    constraint_active: bool = False
 
     def record_errors(self, errors: List[str]):
         for err in errors:
             if err not in self.errors_identified:
                 self.errors_identified.append(err)
+
+
+class ReadLimiter:
+    """Implémente une stratégie progressive de restriction des lectures."""
+
+    MAX_TRACKED_FILES = 20
+    MAX_TOTAL_READS = 3
+    MAX_RECOVERY_TOKENS = 2
+
+    def __init__(self):
+        self.turn = 0
+        self.stage = 0
+        self.total_reads_per_file: Dict[str, int] = {}
+        self.file_order: Deque[str] = deque()
+        self.recovery_allowances: Dict[str, int] = {}
+        self.recovery_granted: Dict[str, int] = {}
+        self.last_failed_patch: Optional[str] = None
+
+    def _stage_for_turn(self, turn: int) -> int:
+        if turn <= 3:
+            return 1  # libre
+        if turn <= 6:
+            return 2  # limité
+        return 3  # blocage
+
+    def start_turn(self, turn: int):
+        """Met à jour le tour courant et log la phase active."""
+        self.turn = turn
+        new_stage = self._stage_for_turn(turn)
+        if new_stage != self.stage:
+            self.stage = new_stage
+            if self.stage == 1:
+                print("[ReadLimiter] Phase 1: lectures libres (limite absolue 3 par fichier).")
+            elif self.stage == 2:
+                print("[ReadLimiter] Phase 2: limitation stricte à 2 lectures par fichier.")
+            else:
+                print("[ReadLimiter] Phase 3: blocage des lectures (sauf récupération après échec de patch).")
+
+    def _ensure_capacity(self, path: str):
+        if path in self.total_reads_per_file:
+            return
+        if len(self.total_reads_per_file) >= self.MAX_TRACKED_FILES:
+            oldest = self.file_order.popleft()
+            self.total_reads_per_file.pop(oldest, None)
+            self.recovery_allowances.pop(oldest, None)
+            self.recovery_granted.pop(oldest, None)
+            print(f"[ReadLimiter] Capacité atteinte, purge du suivi pour {oldest}.")
+        self.file_order.append(path)
+        self.total_reads_per_file[path] = 0
+
+    def _increment_read_count(self, path: str):
+        self._ensure_capacity(path)
+        self.total_reads_per_file[path] = self.total_reads_per_file.get(path, 0) + 1
+
+    def _consume_recovery_token(self, path: str) -> bool:
+        tokens = self.recovery_allowances.get(path, 0)
+        if tokens <= 0:
+            return False
+        tokens -= 1
+        if tokens <= 0:
+            self.recovery_allowances.pop(path, None)
+        else:
+            self.recovery_allowances[path] = tokens
+        print(f"[ReadLimiter] Lecture de récupération autorisée pour {path} (jetons restants: {tokens}).")
+        return True
+
+    def request_read(self, path: str):
+        """Vérifie si la lecture est autorisée pour ce tour."""
+        if not path:
+            return True, None
+
+        current_reads = self.total_reads_per_file.get(path, 0)
+        if current_reads >= self.MAX_TOTAL_READS:
+            message = (
+                f"Lecture refusée pour {path}: limite absolue de {self.MAX_TOTAL_READS} lectures atteinte."
+            )
+            return False, message
+
+        stage = self.stage or self._stage_for_turn(self.turn)
+
+        if stage == 1:
+            self._increment_read_count(path)
+            return True, None
+
+        if stage == 2:
+            if current_reads >= 2:
+                if self._consume_recovery_token(path):
+                    self._increment_read_count(path)
+                    return True, None
+                message = (
+                    f"Lecture refusée pour {path}: limite de 2 lectures atteinte en phase 2."
+                )
+                return False, message
+            self._increment_read_count(path)
+            remaining = max(0, 2 - self.total_reads_per_file.get(path, 0))
+            warning = (
+                f"[ReadLimiter] Tour {self.turn}: lecture autorisée pour {path}. "
+                f"Il reste {remaining} lecture(s) avant blocage phase 2."
+            )
+            print(warning)
+            return True, None
+
+        # Phase 3 (tour >= 7)
+        if self._consume_recovery_token(path):
+            self._increment_read_count(path)
+            return True, None
+        message = (
+            f"Lecture bloquée pour {path}: phase 3 active, effectue un patch avant de relire."
+        )
+        if self.last_failed_patch and self.last_failed_patch != path:
+            message += f" Dernier patch en échec sur {self.last_failed_patch}."
+        return False, message
+
+    def record_patch_result(self, path: str, result: dict):
+        if not path or not isinstance(result, dict):
+            return
+
+        applied = bool(result.get("applied"))
+        had_error = "error" in result
+
+        if applied and not had_error:
+            self.recovery_allowances.pop(path, None)
+            self.last_failed_patch = None
+            return
+
+        tokens_granted = self.recovery_granted.get(path, 0)
+        if tokens_granted >= self.MAX_RECOVERY_TOKENS:
+            self.last_failed_patch = path
+            detail = result.get("error") or result.get("warning")
+            if detail:
+                print(
+                    f"[ReadLimiter] Patch en échec sur {path}, mais quota de récupération épuisé ({detail})."
+                )
+            else:
+                print(
+                    f"[ReadLimiter] Patch en échec sur {path}, mais quota de récupération épuisé."
+                )
+            return
+
+        self.recovery_allowances[path] = self.recovery_allowances.get(path, 0) + 1
+        self.recovery_granted[path] = tokens_granted + 1
+        self.last_failed_patch = path
+        detail = result.get("error") or result.get("warning")
+        suffix = f" ({detail})" if detail else ""
+        print(
+            f"[ReadLimiter] Patch en échec sur {path}, octroi d'une lecture de récupération.{suffix}"
+        )
+
+        # Nettoyage des entrées nulles
+        if self.recovery_allowances.get(path, 0) <= 0:
+            self.recovery_allowances.pop(path, None)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UTILS
@@ -368,7 +517,7 @@ def try_parse_and_apply_edit_blocks(assistant_text: str):
 # ───────────────────────────────────────────────────────────────────────────────
 # TOOL EXECUTOR (VALIDATION + ENVELOPPES + FEEDBACK)
 # ───────────────────────────────────────────────────────────────────────────────
-def call_tool(name, args):
+def call_tool(name, args, read_limiter: Optional[ReadLimiter] = None):
     """
     Exécute l'outil demandé avec validation stricte.
     Retourne toujours une enveloppe: {"ok": True/False, ...}
@@ -388,6 +537,24 @@ def call_tool(name, args):
                 return _err("read_file", "SCHEMA_ERROR",
                             "invalid arguments for read_file",
                             expected={"path": "<str>"}, args=args)
+            if read_limiter:
+                allowed, message = read_limiter.request_read(path)
+                if not allowed:
+                    if message:
+                        print(f"[ReadLimiter] {message}")
+                    expected = None
+                    if read_limiter:
+                        expected = {
+                            "stage": read_limiter.stage,
+                            "remaining_tokens": read_limiter.recovery_allowances.get(path, 0),
+                        }
+                    return _err(
+                        "read_file",
+                        "READ_LIMIT",
+                        message or "lecture bloquée par le ReadLimiter",
+                        expected=expected,
+                        args={"path": path},
+                    )
             res = read_file(path=path)
             return _ok(res)
 
@@ -403,6 +570,8 @@ def call_tool(name, args):
             # Convertir en format edits pour apply_patch
             edits = [{"find": find, "replace": replace}]
             res = apply_patch(path=path, edits=edits)
+            if read_limiter:
+                read_limiter.record_patch_result(path, res)
             return _ok(res)
 
         elif name == "apply_edit_b64":
@@ -432,35 +601,6 @@ def call_tool(name, args):
     except Exception as e:
         return _err(name, "TOOL_RUNTIME_ERROR", f"{e!r}", args=args)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# BOUCLE PRINCIPALE (streaming + timeouts + feedback)
-# ───────────────────────────────────────────────────────────────────────────────
-def _should_inject_constraint(state: AgentState) -> bool:
-    if state.constraint_active:
-        return False
-    cond_errors_wait = bool(state.errors_identified and state.files_read and state.turns_without_patch >= 2)
-    cond_read_loop = state.read_only_turns >= 4
-    return cond_errors_wait or cond_read_loop
-
-
-def _inject_constraint(state: AgentState, msgs):
-    state.constraint_active = True
-    errors = state.errors_identified or []
-    if errors:
-        errors_text = "\n".join(f"- {err}" for err in errors)
-    else:
-        errors_text = "- Corrige une des erreurs détectées précédemment en modifiant le code."
-    constraint_message = (
-        "STOP: tu relis les fichiers sans corriger.\n"
-        "Interdiction de relancer read_file tant qu'un simple_patch réussi n'a pas été appliqué.\n"
-        "Erreurs prioritaires à corriger :\n"
-        f"{errors_text}\n"
-        "Passe immédiatement à l'action avec simple_patch sur l'une de ces erreurs, sans relecture supplémentaire."
-    )
-    print("\n[GUARD] Injection de contrainte : forcer simple_patch.")
-    msgs.append({"role": "user", "content": constraint_message})
-
-
 def main():
     msgs = [
         {"role": "system", "content": SYSTEM},
@@ -468,9 +608,11 @@ def main():
     ]
 
     state = AgentState()
+    limiter = ReadLimiter()
 
     try:
         for turn in range(MAX_TURNS):
+            limiter.start_turn(turn + 1)
             if VERBOSE:
                 print(f"\n===== TURN {turn+1}/{MAX_TURNS} =====")
 
@@ -478,10 +620,6 @@ def main():
             start_global = time.time()
             last_chunk_time = start_global
             got_any_chunk = False
-            turn_had_read = False
-            turn_used_non_read_tool = False
-            turn_applied_patch = False
-
             stream = ollama.chat(
                 model=MODEL,
                 messages=msgs,
@@ -513,15 +651,13 @@ def main():
                         print(f"─── time: {dur:.2f}s  (assistant streamed)")
 
                     if tool_calls:
-                        turn_used_non_read_tool = False
-                        turn_had_read = False
                         # Exécuter chaque tool call
                         for tc in tool_calls:
                             name = tc["function"]["name"]
                             args = tc["function"].get("arguments", {}) or {}
 
                             # 1) Exécuter l'outil (avec enveloppe ok/err)
-                            result = call_tool(name, args)
+                            result = call_tool(name, args, read_limiter=limiter)
 
                             # 2) Pousser le résultat outillé AU MODÈLE
                             msgs.append({"role": "tool", "name": name, "content": json.dumps(result, ensure_ascii=False)})
@@ -548,24 +684,14 @@ def main():
                                 print(f"◀── TOOL RESULT: {name} -> {preview}")
 
                             if name == "read_file":
-                                turn_had_read = True
                                 path = args.get("path")
                                 if isinstance(path, str):
                                     state.files_read.add(path)
-                            else:
-                                turn_used_non_read_tool = True
 
                             if name == "simple_patch" and result.get("ok"):
                                 payload = result.get("result") or {}
                                 if payload.get("applied"):
                                     state.patches_applied += 1
-                                    turn_applied_patch = True
-
-                            if name == "apply_edit_b64" and result.get("ok"):
-                                payload = result.get("result") or {}
-                                if payload.get("applied"):
-                                    turn_applied_patch = True
-                                    turn_used_non_read_tool = True
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -596,9 +722,7 @@ def main():
                     # Pas de tool → tenter fallback bloc EDIT
                     changes = try_parse_and_apply_edit_blocks(assistant_text)
                     if changes:
-                        turn_applied_patch = True
                         state.patches_applied += 1
-                        turn_used_non_read_tool = True
                         msgs.append({"role": "assistant", "content": assistant_text})
                         res = run_harness()
                         print("◀── HARNESS (post-fallback) stdout:\n" + (res.get("stdout") or "")[:4000])
@@ -641,20 +765,6 @@ def main():
 
             else:
                 print("\n[WARN] stream ended without 'done'. Tour suivant.")
-
-            if turn_applied_patch:
-                state.turns_without_patch = 0
-                state.read_only_turns = 0
-                state.constraint_active = False
-            else:
-                state.turns_without_patch += 1
-                if turn_had_read and not turn_used_non_read_tool:
-                    state.read_only_turns += 1
-                else:
-                    state.read_only_turns = 0
-
-            if _should_inject_constraint(state):
-                _inject_constraint(state, msgs)
 
             if not got_any_chunk:
                 print("[AGENT] Aucun chunk reçu de la part du modèle.")
