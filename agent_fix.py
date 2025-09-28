@@ -15,8 +15,9 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 
 import ollama
 
@@ -67,6 +68,25 @@ def _err(tool, code, message, expected=None, args=None):
         "tool": tool, "code": code, "message": message,
         "expected": expected, "args": args
     }}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# ÉTAT DE L'AGENT & UTILS
+# ───────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class AgentState:
+    files_read: set = field(default_factory=set)
+    errors_identified: List[str] = field(default_factory=list)
+    patches_applied: int = 0
+    turns_without_patch: int = 0
+    read_only_turns: int = 0
+    constraint_active: bool = False
+
+    def record_errors(self, errors: List[str]):
+        for err in errors:
+            if err not in self.errors_identified:
+                self.errors_identified.append(err)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UTILS
@@ -231,40 +251,44 @@ def apply_patch(path: str, edits: list):
         "diff_preview": _make_unified_diff(original, updated, path)
     }
 
-def analyze_harness_output(text: str) -> str:
-    """
-    Transforme la sortie de l'harness en suggestions actionnables pour le modèle.
-    """
-    hints = []
+ERROR_HINTS = {
+    "utils.to_int": "Dans src/numops/utils.py -> to_int(s): après strip, si s n'est pas un entier décimal, lever ValueError (ne pas retourner s).",
+    "utils.merge_dicts": "Dans src/numops/utils.py -> merge_dicts(a,b): fusionner en additionnant les valeurs des clés communes (pas simple override {**a, **b}).",
+    "utils.append_item": "Dans src/numops/utils.py -> append_item: paramètre par défaut doit être None et créer une nouvelle liste si None (pas bucket = []).",
+    "stats.mean": "Dans src/numops/stats.py -> mean: utiliser une division flottante sum(values) / len(values), pas //.",
+    "stats.median": "Dans src/numops/stats.py -> median: si n est pair, renvoyer la moyenne (vals[mid-1] + vals[mid]) / 2.",
+    "core.running_total": "Dans src/numops/core.py -> running_total: accumuler puis append le cumul (ne pas préfixer par 0).",
+    "cli.mypy": "Dans src/numops/cli.py: typer ou séparer arr_i (int) pour runtotal et arr_f (float) pour mean pour satisfaire mypy.",
+}
 
-    # utils.to_int — doit lever ValueError si non entier
+
+def detect_errors(text: str) -> List[str]:
+    """Analyse la sortie de l'harness et identifie les erreurs spécifiques."""
+    if not text:
+        return []
+
+    errors = []
     if re.search(r"src\.numops\.utils\.to_int", text) and "ValueError" in text and "Got:\n    'x'" in text:
-        hints.append("Dans src/numops/utils.py -> to_int(s): après strip, si s n'est pas un entier décimal, lever ValueError (ne pas retourner s).")
-
-    # utils.merge_dicts — attend somme sur clés communes
+        errors.append("utils.to_int")
     if re.search(r"src\.numops\.utils\.merge_dicts", text) and '== {"a": 1, "b": 5, "c": 4}' in text:
-        hints.append("Dans src/numops/utils.py -> merge_dicts(a,b): fusionner en additionnant les valeurs des clés communes (pas simple override {**a, **b}).")
-
-    # utils.append_item — défaut de liste mutable
+        errors.append("utils.merge_dicts")
     if re.search(r"src\.numops\.utils\.append_item", text) and "Expected:\n    ['b']" in text:
-        hints.append("Dans src/numops/utils.py -> append_item: paramètre par défaut doit être None et créer une nouvelle liste si None (pas bucket = []).")
-
-    # stats.mean — division entière //
+        errors.append("utils.append_item")
     if re.search(r"src\.numops\.stats\.mean", text) and "Expected:\n    0.2" in text and "Got:\n    0.0" in text:
-        hints.append("Dans src/numops/stats.py -> mean: utiliser une division flottante sum(values) / len(values), pas //.")
-
-    # stats.median — pair: moyenne des deux du milieu
+        errors.append("stats.mean")
     if re.search(r"src\.numops\.stats\.median", text) and "median([1, 2, 3, 4])" in text and "Expected:\n    2.5" in text:
-        hints.append("Dans src/numops/stats.py -> median: si n est pair, renvoyer la moyenne (vals[mid-1] + vals[mid]) / 2.")
-
-    # core.running_total — ne pas préfixer par 0
+        errors.append("stats.median")
     if re.search(r"src\.numops\.core\.running_total", text) and "Expected:\n    [1, 3, 6]" in text and "Got:\n    [0, 1, 3, 6]" in text:
-        hints.append("Dans src/numops/core.py -> running_total: accumuler puis append le cumul (ne pas préfixer par 0).")
-
-    # mypy CLI types
+        errors.append("core.running_total")
     if 'mypy' in text and 'src/numops/cli.py' in text and 'mean(arr)' in text:
-        hints.append("Dans src/numops/cli.py: typer ou séparer arr_i (int) pour runtotal et arr_f (float) pour mean pour satisfaire mypy.")
+        errors.append("cli.mypy")
+    return errors
 
+
+def analyze_harness_output(text: str) -> str:
+    """Transforme la sortie de l'harness en suggestions actionnables pour le modèle."""
+    error_ids = detect_errors(text)
+    hints = [ERROR_HINTS[eid] for eid in error_ids if eid in ERROR_HINTS]
     if not hints:
         return ""
     return "Voici des corrections ciblées à effectuer avec simple_patch (find→replace) ou apply_edit_b64 :\n- " + "\n- ".join(hints)
@@ -411,11 +435,39 @@ def call_tool(name, args):
 # ───────────────────────────────────────────────────────────────────────────────
 # BOUCLE PRINCIPALE (streaming + timeouts + feedback)
 # ───────────────────────────────────────────────────────────────────────────────
+def _should_inject_constraint(state: AgentState) -> bool:
+    if state.constraint_active:
+        return False
+    cond_errors_wait = bool(state.errors_identified and state.files_read and state.turns_without_patch >= 2)
+    cond_read_loop = state.read_only_turns >= 4
+    return cond_errors_wait or cond_read_loop
+
+
+def _inject_constraint(state: AgentState, msgs):
+    state.constraint_active = True
+    errors = state.errors_identified or []
+    if errors:
+        errors_text = "\n".join(f"- {err}" for err in errors)
+    else:
+        errors_text = "- Corrige une des erreurs détectées précédemment en modifiant le code."
+    constraint_message = (
+        "STOP: tu relis les fichiers sans corriger.\n"
+        "Interdiction de relancer read_file tant qu'un simple_patch réussi n'a pas été appliqué.\n"
+        "Erreurs prioritaires à corriger :\n"
+        f"{errors_text}\n"
+        "Passe immédiatement à l'action avec simple_patch sur l'une de ces erreurs, sans relecture supplémentaire."
+    )
+    print("\n[GUARD] Injection de contrainte : forcer simple_patch.")
+    msgs.append({"role": "user", "content": constraint_message})
+
+
 def main():
     msgs = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": "Commence par exécuter run_harness pour voir ce qui casse, puis corrige."}
     ]
+
+    state = AgentState()
 
     try:
         for turn in range(MAX_TURNS):
@@ -426,6 +478,9 @@ def main():
             start_global = time.time()
             last_chunk_time = start_global
             got_any_chunk = False
+            turn_had_read = False
+            turn_used_non_read_tool = False
+            turn_applied_patch = False
 
             stream = ollama.chat(
                 model=MODEL,
@@ -458,6 +513,8 @@ def main():
                         print(f"─── time: {dur:.2f}s  (assistant streamed)")
 
                     if tool_calls:
+                        turn_used_non_read_tool = False
+                        turn_had_read = False
                         # Exécuter chaque tool call
                         for tc in tool_calls:
                             name = tc["function"]["name"]
@@ -478,6 +535,9 @@ def main():
                                 if stderr.strip():
                                     print("◀── HARNESS stderr:\n" + stderr[:4000])
                                 print(f"◀── HARNESS returncode: {payload.get('returncode')}")
+                                detected = detect_errors(stdout)
+                                if detected:
+                                    state.record_errors(detected)
                                 suggestion = analyze_harness_output(stdout)
                                 if suggestion:
                                     msgs.append({"role": "user", "content": suggestion})
@@ -486,6 +546,26 @@ def main():
                                 if len(preview) > 1200:
                                     preview = preview[:1200] + "…"
                                 print(f"◀── TOOL RESULT: {name} -> {preview}")
+
+                            if name == "read_file":
+                                turn_had_read = True
+                                path = args.get("path")
+                                if isinstance(path, str):
+                                    state.files_read.add(path)
+                            else:
+                                turn_used_non_read_tool = True
+
+                            if name == "simple_patch" and result.get("ok"):
+                                payload = result.get("result") or {}
+                                if payload.get("applied"):
+                                    state.patches_applied += 1
+                                    turn_applied_patch = True
+
+                            if name == "apply_edit_b64" and result.get("ok"):
+                                payload = result.get("result") or {}
+                                if payload.get("applied"):
+                                    turn_applied_patch = True
+                                    turn_used_non_read_tool = True
 
                             # 4) FEEDBACK anti-répétition
                             key = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
@@ -516,9 +596,15 @@ def main():
                     # Pas de tool → tenter fallback bloc EDIT
                     changes = try_parse_and_apply_edit_blocks(assistant_text)
                     if changes:
+                        turn_applied_patch = True
+                        state.patches_applied += 1
+                        turn_used_non_read_tool = True
                         msgs.append({"role": "assistant", "content": assistant_text})
                         res = run_harness()
                         print("◀── HARNESS (post-fallback) stdout:\n" + (res.get("stdout") or "")[:4000])
+                        detected = detect_errors(res.get("stdout"))
+                        if detected:
+                            state.record_errors(detected)
                         msgs.append({"role": "tool", "name": "run_harness", "content": json.dumps(_ok(res))})
                         break
 
@@ -555,6 +641,20 @@ def main():
 
             else:
                 print("\n[WARN] stream ended without 'done'. Tour suivant.")
+
+            if turn_applied_patch:
+                state.turns_without_patch = 0
+                state.read_only_turns = 0
+                state.constraint_active = False
+            else:
+                state.turns_without_patch += 1
+                if turn_had_read and not turn_used_non_read_tool:
+                    state.read_only_turns += 1
+                else:
+                    state.read_only_turns = 0
+
+            if _should_inject_constraint(state):
+                _inject_constraint(state, msgs)
 
             if not got_any_chunk:
                 print("[AGENT] Aucun chunk reçu de la part du modèle.")
