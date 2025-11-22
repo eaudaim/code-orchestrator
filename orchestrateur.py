@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 import ollama
 from tqdm import tqdm
 from rich.console import Console
@@ -33,6 +33,15 @@ console = Console(force_terminal=True)
 # Configuration
 # -----------------------------
 MODEL_NAME = "qwen2.5-coder:14b"
+# Configuration de compatibilité par modèle
+MODEL_COMPAT = {
+    "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
+    "qwen2.5-coder:14b": {"native_tools": False, "json_fallback": True},
+}
+DEFAULT_MODEL_COMPAT = {"native_tools": True, "json_fallback": False}
+
+MODEL_NATIVE_TOOLS = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["native_tools"]
+MODEL_JSON_FALLBACK = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["json_fallback"]
 MAX_BYTES_PER_FILE = 500 * 1024  # 500 KB par défaut
 MAX_TOTAL_BYTES = 5 * 1024 * 1024  # 5 Mo max total envoyés au modèle
 SCRIPT_NAME = "analyse_fichiers_llm.py"  # Nom du script à exclure
@@ -117,51 +126,61 @@ def collect_files(
         console.print(f"[dim]   ✓ {rel_path} ({size_to_read / 1024:.1f} KB)[/dim]")
     console.print(f"[green]✅ Collecté {len(files_data)} fichiers ({total_bytes / 1024:.1f} KB).[/green]")
     return files_data
-def build_prompt(files_data: Dict[str, str]) -> str:
+def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
     """
     Construit un prompt structuré à envoyer au modèle.
     On sépare chaque fichier par un délimiteur clair.
     """
     parts = [
-    "You are a methodical code assistant that MUST follow structured debugging and development processes.",
-    "",
-    "=== AVAILABLE TOOLS (NEVER invent others) ===",
-    "1. list_files(directory_path='.')  → List files in directory",  
-    "2. read_file(file_path='myfile.py')  → Read complete file content",
-    "3. write_file(file_path, content, line_start, line_end)  → Modify files with line precision",
-    "4. execute_code(file_path='myfile.py')  → Run Python files",
-    "5. create_venv(venv_path='.venv')  → Create virtual environment",
-    "",
-    "=== MANDATORY PARAMETER RULES ===",
-    "❌ read_file: ONLY file_path (NEVER line_start/line_end)",
-    "✅ write_file: ALL 4 parameters required (file_path, content, line_start, line_end)",  
-    "✅ list_files: directory_path only (optional, default='.')",
-    "✅ execute_code: file_path only",
-    "✅ create_venv: venv_path only (optional, default='.venv')",
-    "",
-    "=== WRITE_FILE LINE EXAMPLES ===",
-    "• write_file('f.py', 'code', 1, -1)     ← Replace ENTIRE file",
-    "• write_file('f.py', 'code', 50, 49)    ← INSERT at line 50 (no deletion)",  
-    "• write_file('f.py', 'code', 10, 20)    ← REPLACE lines 10-20",
-    "",
-    "=== MANDATORY WORKFLOW - NO SHORTCUTS ===", 
-    "For ANY task, you MUST follow this exact sequence:",
-    "1. 🔍 EXPLORE: Call list_files() to understand project structure",
-    "2. 📖 READ: Call read_file() on relevant files to understand current code",
-    "3. 📊 ANALYZE: Think through what changes are needed",
-    "4. ✏️ IMPLEMENT: Use write_file() with precise line numbers",  
-    "5. ✅ VERIFY: Use execute_code() or read_file() to confirm changes",
-    "",
-    "=== CRITICAL BEHAVIORAL RULES ===",
-    "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
-    "• NEVER take shortcuts or assume previous work",
-    "• ALWAYS read files before modifying them to count lines",
-    "• NEVER invent tools or use tools that don't exist",
-    "• Each tool call must have a clear purpose and be executed",
-    "• Follow the 5-step workflow for every code task",
-    "",
-    "Current files in repository:",
-]
+        "You are a methodical code assistant that MUST follow structured debugging and development processes.",
+        "",
+        "=== AVAILABLE TOOLS (NEVER invent others) ===",
+        "1. list_files(directory_path='.')  → List files in directory",
+        "2. read_file(file_path='myfile.py')  → Read complete file content",
+        "3. write_file(file_path, content, line_start, line_end)  → Modify files with line precision",
+        "4. execute_code(file_path='myfile.py')  → Run Python files",
+        "5. create_venv(venv_path='.venv')  → Create virtual environment",
+        "",
+        "=== MANDATORY PARAMETER RULES ===",
+        "❌ read_file: ONLY file_path (NEVER line_start/line_end)",
+        "✅ write_file: ALL 4 parameters required (file_path, content, line_start, line_end)",
+        "✅ list_files: directory_path only (optional, default='.')",
+        "✅ execute_code: file_path only",
+        "✅ create_venv: venv_path only (optional, default='.venv')",
+        "",
+        "=== WRITE_FILE LINE EXAMPLES ===",
+        "• write_file('f.py', 'code', 1, -1)     ← Replace ENTIRE file",
+        "• write_file('f.py', 'code', 50, 49)    ← INSERT at line 50 (no deletion)",
+        "• write_file('f.py', 'code', 10, 20)    ← REPLACE lines 10-20",
+        "",
+        "=== MANDATORY WORKFLOW - NO SHORTCUTS ===",
+        "For ANY task, you MUST follow this exact sequence:",
+        "1. 🔍 EXPLORE: Call list_files() to understand project structure",
+        "2. 📖 READ: Call read_file() on relevant files to understand current code",
+        "3. 📊 ANALYZE: Think through what changes are needed",
+        "4. ✏️ IMPLEMENT: Use write_file() with precise line numbers",
+        "5. ✅ VERIFY: Use execute_code() or read_file() to confirm changes",
+        "",
+        "=== CRITICAL BEHAVIORAL RULES ===",
+        "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
+        "• NEVER take shortcuts or assume previous work",
+        "• ALWAYS read files before modifying them to count lines",
+        "• NEVER invent tools or use tools that don't exist",
+        "• Each tool call must have a clear purpose and be executed",
+        "• Follow the 5-step workflow for every code task",
+    ]
+
+    if not native_tools:
+        parts.extend([
+            "",
+            "=== TOOL CALL FORMAT (JSON OUTPUT ONLY) ===",
+            "When you need a tool, respond *only* with JSON objects using the schema: {\"name\": \"tool_name\", \"arguments\": { ... }}",
+            "For multiple tool calls, return an array of such objects.",
+            "Do NOT wrap the JSON in prose. No markdown, no extra text.",
+        ])
+
+    parts.append("")
+    parts.append("Current files in repository:")
     
     for filename, content in files_data.items():
         parts.append(f"--- {filename} ---")
@@ -193,8 +212,82 @@ def detect_dangerous_patterns(code: str) -> List[str]:
     for pattern, description in patterns.items():
         if re.search(pattern, code):
             warnings.append(f"⚠️  {description}")
-    
+
     return warnings
+
+
+def parse_json_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """Extraie des tool calls encodés en JSON depuis une réponse texte.
+
+    Supporte plusieurs formats :
+    - JSON direct : {"name": "...", "arguments": {...}}
+    - JSON dans des blocs de code markdown
+    - Tableaux de tool calls multiples
+    Retourne une liste de tool calls au format attendu par Ollama.
+    """
+    if not text:
+        return []
+
+    candidates: List[str] = []
+    stripped = text.strip()
+
+    # JSON direct en début de message
+    if stripped.startswith("{") or stripped.startswith("["):
+        candidates.append(stripped)
+
+    # Blocs de code markdown (```json ...``` ou ``` ... ```)
+    code_block_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+    for block in code_block_pattern.findall(text):
+        block = block.strip()
+        if block:
+            candidates.append(block)
+
+    # JSON inline minimal contenant un "name" pour couvrir les cas restants
+    inline_pattern = re.compile(r"(\{\s*\"name\"\s*:\s*\"[^\"]+\"[\s\S]*?\})")
+    for match in inline_pattern.findall(text):
+        match = match.strip()
+        if match:
+            candidates.append(match)
+
+    tool_calls: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+
+    def add_tool_call(name: str, arguments: Any) -> None:
+        call_id = f"json-tool-{len(tool_calls) + 1}"
+        tool_calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments if arguments is not None else {},
+                },
+            }
+        )
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            if "name" in obj and "arguments" in obj:
+                add_tool_call(obj.get("name", ""), obj.get("arguments", {}))
+            else:
+                for value in obj.values():
+                    walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            log_verbose(f"Échec de parsing JSON (fallback tool calls) pour: {candidate[:100]}")
+            continue
+        walk(parsed)
+
+    return tool_calls
 # -----------------------------
 # Tool (function calling) definition
 # -----------------------------
@@ -713,7 +806,7 @@ def chat_loop(files_data: Dict[str, str]):
     nous la gérons ici.
     """
     # Ollama préfère un message initial "user" plutôt que "system"
-    initial_context = build_prompt(files_data)
+    initial_context = build_prompt(files_data, native_tools=MODEL_NATIVE_TOOLS)
     
     console.print("[cyan]💬 Vous êtes maintenant connecté au modèle. Tapez votre question ou 'exit' pour quitter.[/cyan]")
     console.print(f"[dim]📦 Contexte chargé : {len(files_data)} fichiers en mémoire[/dim]")
@@ -768,17 +861,20 @@ def chat_loop(files_data: Dict[str, str]):
         log_verbose(f"Nombre de messages dans l'historique : {len(messages)}")
         try:
             log_verbose(f"Appel à ollama.chat() avec modèle {MODEL_NAME}, reasoning={REASONING_LEVEL}")
-            response = ollama.chat(
-                model=MODEL_NAME,
-                messages=messages,
-                tools=TOOLS,
-                stream=True,
-                options={
+            ollama_params = {
+                "model": MODEL_NAME,
+                "messages": messages,
+                "stream": True,
+                "options": {
                     "num_ctx": 16384,  # Contexte maximum pour gpt-oss
                     "temperature": 0.2,  # Encore plus strict
                     "repeat_penalty": 1.3,  # Anti-répétition
                 },
-            )
+            }
+            if MODEL_NATIVE_TOOLS:
+                ollama_params["tools"] = TOOLS
+
+            response = ollama.chat(**ollama_params)
             log_verbose("Réponse du modèle reçue, début du streaming")
         except Exception as e:
             console.print(f"[red]❌ Erreur lors de l'appel au modèle : {e}[/red]")
@@ -831,6 +927,21 @@ def chat_loop(files_data: Dict[str, str]):
                     break
         console.print()  # Nouvelle ligne
         log_verbose(f"Streaming terminé. Thinking: {len(thinking_content)} chars, Contenu: {len(assistant_content)} chars")
+
+        # Fallback JSON -> tool_calls pour les modèles sans support natif
+        if not has_tool_calls and MODEL_JSON_FALLBACK:
+            try:
+                fallback_calls = parse_json_tool_calls(assistant_content)
+            except Exception as parse_error:
+                log_verbose(f"Erreur lors du parsing JSON fallback : {parse_error}")
+                fallback_calls = []
+
+            if fallback_calls:
+                console.print("[yellow]🔧 Tool calls JSON détectés, conversion en format natif.[/yellow]")
+                log_verbose(f"Tool calls convertis depuis JSON : {fallback_calls}")
+                has_tool_calls = True
+                tool_calls_data = fallback_calls
+                assistant_content = ""
         # Si le modèle a appelé des outils
         if has_tool_calls:
             log_verbose(f"Traitement de {len(tool_calls_data)} tool call(s)")
@@ -1160,18 +1271,21 @@ ONLY use the tools listed above. No exceptions."""
             log_verbose(f"Nouvel appel au modèle avec {len(messages)} messages")
             
             try:
-                response = ollama.chat(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    tools=TOOLS,
-                    stream=True,
-                    options={
+                ollama_params = {
+                    "model": MODEL_NAME,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {
                         "num_ctx": 16384,
                         "temperature": 0.2,
                         "repeat_penalty": 1.3,
                     },
-                )
-                
+                }
+                if MODEL_NATIVE_TOOLS:
+                    ollama_params["tools"] = TOOLS
+
+                response = ollama.chat(**ollama_params)
+
                 assistant_content = ""
                 for chunk in response:
                     if "message" in chunk:
@@ -1197,7 +1311,7 @@ ONLY use the tools listed above. No exceptions."""
 # Main
 # -----------------------------
 def main():
-    global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES
+    global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES, MODEL_NAME, MODEL_NATIVE_TOOLS, MODEL_JSON_FALLBACK
     
     parser = argparse.ArgumentParser(description="Ollama Code-Assistant")
     parser.add_argument(
@@ -1205,6 +1319,11 @@ def main():
         nargs="?",
         default=".",
         help="Répertoire contenant le code à analyser (par défaut le répertoire courant).",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL_NAME,
+        help="Nom du modèle Ollama à utiliser (par défaut: %(default)s).",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -1234,7 +1353,12 @@ def main():
     REASONING_LEVEL = args.reasoning
     EXEC_TIMEOUT = args.exec_timeout
     MAX_RETRIES = args.max_retries
-    
+    MODEL_NAME = args.model
+
+    compat = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)
+    MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
+    MODEL_JSON_FALLBACK = compat.get("json_fallback", DEFAULT_MODEL_COMPAT["json_fallback"])
+
     if VERBOSE:
         console.print("[magenta]🔍 Mode VERBOSE activé[/magenta]")
     
@@ -1243,6 +1367,9 @@ def main():
     console.print(f"[dim]Niveau de réflexion : {REASONING_LEVEL}[/dim]")
     console.print(f"[dim]Timeout d'exécution : {EXEC_TIMEOUT}s[/dim]")
     console.print(f"[dim]Max tentatives : {MAX_RETRIES}[/dim]\n")
+    console.print(
+        f"[dim]Compat tools natifs : {MODEL_NATIVE_TOOLS} | JSON fallback : {MODEL_JSON_FALLBACK}[/dim]"
+    )
     root = Path(args.directory).resolve()
     if not root.is_dir():
         console.print(f"[red]❌ Erreur : {root} n'est pas un répertoire valide.[/red]")
