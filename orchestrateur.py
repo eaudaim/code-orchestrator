@@ -32,7 +32,7 @@ console = Console(force_terminal=True)
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_NAME = "gpt-oss:20b"
+MODEL_NAME = "qwen2.5-coder:14b"
 MAX_BYTES_PER_FILE = 500 * 1024  # 500 KB par défaut
 MAX_TOTAL_BYTES = 5 * 1024 * 1024  # 5 Mo max total envoyés au modèle
 SCRIPT_NAME = "analyse_fichiers_llm.py"  # Nom du script à exclure
