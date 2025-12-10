@@ -49,6 +49,8 @@ VERBOSE = False  # Mode verbeux (défini par argument CLI)
 REASONING_LEVEL = "medium"  # Niveau de réflexion : low, medium, high
 EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
 MAX_RETRIES = 3  # Nombre maximum de tentatives d'exécution
+MAX_AUTONOMY_ITERATIONS = 20  # Nombre max d'itérations autonomes
+AUTONOMY_TIMEOUT = 5  # Timeout entre itérations autonomes (secondes)
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -815,10 +817,11 @@ def chat_loop(files_data: Dict[str, str]):
     console.print(f"[dim]💡 Tip: Le modèle utilisera les outils automatiquement, pas besoin de les demander explicitement[/dim]")
     messages = []
     context_sent = False
-    execution_count = {}  # Track executions per question
+    execution_count = {}  # Track executions per question (multi-actions prêt)
     pending_tool_responses: Set[Tuple[str, str]] = set()
-    tool_call_depth = 0  # Limite la profondeur des appels automatiques
+    tool_call_depth = 0  # Limite la profondeur des appels automatiques (compatible autonomie)
     while True:
+        # Réaffiche l'invite utilisateur avant chaque interaction
         console.print("\n[bold green]Vous> [/bold green]", end="")
         
         # CORRECTION: Permettre un input multi-lignes
@@ -922,7 +925,7 @@ def chat_loop(files_data: Dict[str, str]):
                     has_tool_calls = True
                     tool_calls_data = msg["tool_calls"]
                     log_verbose(f"Tool calls détectés : {tool_calls_data}")
-                    # ARRÊT IMMÉDIAT du streaming pour traitement synchrone
+                    # ARRÊT IMMÉDIAT du streaming pour traitement synchrone (tool call détecté)
                     console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
                     break
         console.print()  # Nouvelle ligne
@@ -1255,6 +1258,7 @@ ONLY use the tools listed above. No exceptions."""
                     "[yellow]⚠️  Le modèle a fait plusieurs actions. "
                     "Tapez 'continuer' pour qu'il continue, ou posez une nouvelle question.[/yellow]"
                 )
+                # Réaffichage explicite de l'invite utilisateur après enchaînement d'actions
                 console.print("[bold green]Vous> [/bold green]", end="")
                 continue_input = input()
                 if continue_input.lower() not in {"continuer", "continue", "c"}:
@@ -1303,6 +1307,8 @@ ONLY use the tools listed above. No exceptions."""
             except Exception as e:
                 console.print(f"\n[red]❌ Erreur : {e}[/red]")
                 log_verbose(f"Exception lors du re-call : {e}")
+        # TODO: Insérer ici la logique d'autonomie (gestion des itérations/tool calls)
+        # avant de revenir à l'invite utilisateur pour la boucle suivante.
         # Conserver la réponse dans le dialogue
         if assistant_content:
             messages.append({"role": "assistant", "content": assistant_content})
