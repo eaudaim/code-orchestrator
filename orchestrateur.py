@@ -51,6 +51,7 @@ EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
 MAX_RETRIES = 3  # Nombre maximum de tentatives d'exécution
 MAX_AUTONOMY_ITERATIONS = 20  # Nombre max d'itérations autonomes
 AUTONOMY_TIMEOUT = 5  # Timeout entre itérations autonomes (secondes)
+AUTONOMY = False  # Mode autonomie (enchaînement automatique des tool calls)
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -815,6 +816,99 @@ def chat_loop(files_data: Dict[str, str]):
     console.print(f"[dim]🛠️  Le modèle peut lire, modifier et exécuter des fichiers (avec votre confirmation)[/dim]")
     console.print(f"[dim]⏱️  Timeout d'exécution : {EXEC_TIMEOUT}s | Max tentatives : {MAX_RETRIES}[/dim]")
     console.print(f"[dim]💡 Tip: Le modèle utilisera les outils automatiquement, pas besoin de les demander explicitement[/dim]")
+
+    def call_model_and_stream(current_messages: List[Dict]) -> Tuple[Dict, bool, List[Dict]]:
+        """Appelle le modèle et gère le streaming, retourne le message assistant et les tool calls."""
+        console.print("[dim]🤖 Le modèle réfléchit...[/dim]")
+        log_verbose(f"Nombre de messages dans l'historique : {len(current_messages)}")
+
+        try:
+            log_verbose(f"Appel à ollama.chat() avec modèle {MODEL_NAME}, reasoning={REASONING_LEVEL}")
+            ollama_params = {
+                "model": MODEL_NAME,
+                "messages": current_messages,
+                "stream": True,
+                "options": {
+                    "num_ctx": 16384,  # Contexte maximum pour gpt-oss
+                    "temperature": 0.2,  # Encore plus strict
+                    "repeat_penalty": 1.3,  # Anti-répétition
+                },
+            }
+            if MODEL_NATIVE_TOOLS:
+                ollama_params["tools"] = TOOLS
+
+            response = ollama.chat(**ollama_params)
+            log_verbose("Réponse du modèle reçue, début du streaming")
+        except Exception as e:
+            console.print(f"[red]❌ Erreur lors de l'appel au modèle : {e}[/red]")
+            log_verbose(f"Exception complète : {e}")
+            return {"role": "assistant", "content": ""}, False, []
+
+        assistant_content = ""
+        thinking_content = ""
+        has_tool_calls = False
+        tool_calls_data: List[Dict] = []
+
+        chunk_count = 0
+        is_thinking = False
+
+        console.print("[bold blue]Assistant> [/bold blue]")
+        for chunk in response:
+            chunk_count += 1
+            log_verbose(f"Chunk #{chunk_count} reçu : {chunk}")
+
+            if "message" not in chunk:
+                continue
+
+            msg = chunk["message"]
+
+            if "thinking" in msg and msg["thinking"]:
+                thinking_part = msg["thinking"]
+                thinking_content += thinking_part
+                if not is_thinking:
+                    console.print("[dim cyan]💭 Réflexion en cours...[/dim cyan]", end="")
+                    is_thinking = True
+                console.print(thinking_part, end="")
+
+            if "content" in msg and msg["content"]:
+                if is_thinking:
+                    console.print("\n[bold blue]💬 Réponse:[/bold blue]")
+                    is_thinking = False
+                content_part = msg["content"]
+                assistant_content += content_part
+                console.print(content_part, end="")
+
+            if "tool_calls" in msg and msg["tool_calls"]:
+                has_tool_calls = True
+                tool_calls_data = msg["tool_calls"]
+                log_verbose(f"Tool calls détectés : {tool_calls_data}")
+                console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
+                break
+
+        console.print()
+        log_verbose(
+            f"Streaming terminé. Thinking: {len(thinking_content)} chars, Contenu: {len(assistant_content)} chars"
+        )
+
+        if not has_tool_calls and MODEL_JSON_FALLBACK:
+            try:
+                fallback_calls = parse_json_tool_calls(assistant_content)
+            except Exception as parse_error:
+                log_verbose(f"Erreur lors du parsing JSON fallback : {parse_error}")
+                fallback_calls = []
+
+            if fallback_calls:
+                console.print("[yellow]🔧 Tool calls JSON détectés, conversion en format natif.[/yellow]")
+                log_verbose(f"Tool calls convertis depuis JSON : {fallback_calls}")
+                has_tool_calls = True
+                tool_calls_data = fallback_calls
+                assistant_content = ""
+
+        assistant_message = {"role": "assistant", "content": assistant_content}
+        if has_tool_calls:
+            assistant_message["tool_calls"] = tool_calls_data
+
+        return assistant_message, has_tool_calls, tool_calls_data
     messages = []
     context_sent = False
     execution_count = {}  # Track executions per question (multi-actions prêt)
@@ -860,104 +954,14 @@ def chat_loop(files_data: Dict[str, str]):
         else:
             messages.append({"role": "user", "content": user_input})
             log_verbose(f"Message utilisateur ajouté : {user_input[:100]}...")
-        console.print("[dim]🤖 Le modèle réfléchit...[/dim]")
-        log_verbose(f"Nombre de messages dans l'historique : {len(messages)}")
-        try:
-            log_verbose(f"Appel à ollama.chat() avec modèle {MODEL_NAME}, reasoning={REASONING_LEVEL}")
-            ollama_params = {
-                "model": MODEL_NAME,
-                "messages": messages,
-                "stream": True,
-                "options": {
-                    "num_ctx": 16384,  # Contexte maximum pour gpt-oss
-                    "temperature": 0.2,  # Encore plus strict
-                    "repeat_penalty": 1.3,  # Anti-répétition
-                },
-            }
-            if MODEL_NATIVE_TOOLS:
-                ollama_params["tools"] = TOOLS
+        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+        messages.append(assistant_message)
 
-            response = ollama.chat(**ollama_params)
-            log_verbose("Réponse du modèle reçue, début du streaming")
-        except Exception as e:
-            console.print(f"[red]❌ Erreur lors de l'appel au modèle : {e}[/red]")
-            log_verbose(f"Exception complète : {e}")
-            continue
-        # Collecter la réponse en streaming
-        assistant_content = ""
-        thinking_content = ""
-        console.print("[bold blue]Assistant> [/bold blue]")
-        
-        has_tool_calls = False
-        tool_calls_data = []
-        
-        chunk_count = 0
-        is_thinking = False
-        
-        for chunk in response:
-            chunk_count += 1
-            log_verbose(f"Chunk #{chunk_count} reçu : {chunk}")
-            
-            # Afficher le contenu si présent
-            if "message" in chunk:
-                msg = chunk["message"]
-                
-                # Détection du thinking (réflexion du modèle)
-                if "thinking" in msg and msg["thinking"]:
-                    thinking_part = msg["thinking"]
-                    thinking_content += thinking_part
-                    if not is_thinking:
-                        console.print("[dim cyan]💭 Réflexion en cours...[/dim cyan]", end="")
-                        is_thinking = True
-                    console.print(thinking_part, end="")
-                
-                # Contenu textuel (réponse finale)
-                if "content" in msg and msg["content"]:
-                    if is_thinking:
-                        console.print("\n[bold blue]💬 Réponse:[/bold blue]")
-                        is_thinking = False
-                    content_part = msg["content"]
-                    assistant_content += content_part
-                    console.print(content_part, end="")
-                
-                # Tool calls
-                if "tool_calls" in msg and msg["tool_calls"]:
-                    has_tool_calls = True
-                    tool_calls_data = msg["tool_calls"]
-                    log_verbose(f"Tool calls détectés : {tool_calls_data}")
-                    # ARRÊT IMMÉDIAT du streaming pour traitement synchrone (tool call détecté)
-                    console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
-                    break
-        console.print()  # Nouvelle ligne
-        log_verbose(f"Streaming terminé. Thinking: {len(thinking_content)} chars, Contenu: {len(assistant_content)} chars")
-
-        # Fallback JSON -> tool_calls pour les modèles sans support natif
-        if not has_tool_calls and MODEL_JSON_FALLBACK:
-            try:
-                fallback_calls = parse_json_tool_calls(assistant_content)
-            except Exception as parse_error:
-                log_verbose(f"Erreur lors du parsing JSON fallback : {parse_error}")
-                fallback_calls = []
-
-            if fallback_calls:
-                console.print("[yellow]🔧 Tool calls JSON détectés, conversion en format natif.[/yellow]")
-                log_verbose(f"Tool calls convertis depuis JSON : {fallback_calls}")
-                has_tool_calls = True
-                tool_calls_data = fallback_calls
-                assistant_content = ""
-        # Si le modèle a appelé des outils
-        if has_tool_calls:
+        while has_tool_calls and tool_call_depth < MAX_AUTONOMY_ITERATIONS:
             log_verbose(f"Traitement de {len(tool_calls_data)} tool call(s)")
-            
+
             tool_call_depth += 1
-            
-            # Ajouter le message de l'assistant avec les tool calls
-            messages.append({
-                "role": "assistant",
-                "content": assistant_content,
-                "tool_calls": tool_calls_data
-            })
-            
+
             for call in tool_calls_data:
                 function_name = call.get("function", {}).get("name", "")
                 arguments = call.get("function", {}).get("arguments", {})
@@ -1252,72 +1256,48 @@ ONLY use the tools listed above. No exceptions."""
                 else:
                     console.print(f"[red]   ❌ Outil inconnu : {function_name}[/red]")
             
-            # Limiter la profondeur des appels automatiques
-            if tool_call_depth >= 5:
+
+            if AUTONOMY and tool_call_depth >= MAX_AUTONOMY_ITERATIONS:
+                console.print(
+                    "[yellow]⚠️  Limite d'autonomie atteinte, arrêt des appels automatiques supplémentaires.[/yellow]"
+                )
+                break
+
+            if not AUTONOMY and tool_call_depth >= 5:
                 console.print(
                     "[yellow]⚠️  Le modèle a fait plusieurs actions. "
                     "Tapez 'continuer' pour qu'il continue, ou posez une nouvelle question.[/yellow]"
                 )
-                # Réaffichage explicite de l'invite utilisateur après enchaînement d'actions
                 console.print("[bold green]Vous> [/bold green]", end="")
                 continue_input = input()
                 if continue_input.lower() not in {"continuer", "continue", "c"}:
-                    # L'utilisateur a posé une nouvelle question
                     user_input = continue_input
                     messages.append({"role": "user", "content": user_input})
                     execution_count = {}
                     tool_call_depth = 0
-                    # On ne fait pas de continue, on laisse le code continuer normalement
-            
-            # Re-call le modèle avec les résultats des outils
-            console.print("[dim]🤖 Le modèle traite les résultats...[/dim]")
-            console.print("[bold blue]Assistant> [/bold blue]", end="")
-            log_verbose(f"Nouvel appel au modèle avec {len(messages)} messages")
-            
-            try:
-                ollama_params = {
-                    "model": MODEL_NAME,
-                    "messages": messages,
-                    "stream": True,
-                    "options": {
-                        "num_ctx": 16384,
-                        "temperature": 0.2,
-                        "repeat_penalty": 1.3,
-                    },
-                }
-                if MODEL_NATIVE_TOOLS:
-                    ollama_params["tools"] = TOOLS
+                    assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+                    messages.append(assistant_message)
+                    if not has_tool_calls:
+                        break
+                else:
+                    log_verbose("L'utilisateur a confirmé la poursuite des actions.")
 
-                response = ollama.chat(**ollama_params)
+            assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+            messages.append(assistant_message)
 
-                assistant_content = ""
-                for chunk in response:
-                    if "message" in chunk:
-                        msg = chunk["message"]
-                        if "thinking" in msg and msg["thinking"]:
-                            console.print(msg["thinking"], end="")
-                        if "content" in msg and msg["content"]:
-                            content_part = msg["content"]
-                            assistant_content += content_part
-                            console.print(content_part, end="")
-                
-                console.print()
-                log_verbose(f"Réponse finale après tool call : {len(assistant_content)} caractères")
-                
-            except Exception as e:
-                console.print(f"\n[red]❌ Erreur : {e}[/red]")
-                log_verbose(f"Exception lors du re-call : {e}")
-        # TODO: Insérer ici la logique d'autonomie (gestion des itérations/tool calls)
-        # avant de revenir à l'invite utilisateur pour la boucle suivante.
-        # Conserver la réponse dans le dialogue
-        if assistant_content:
-            messages.append({"role": "assistant", "content": assistant_content})
-            log_verbose(f"Réponse de l'assistant ajoutée à l'historique")
+            if not (AUTONOMY and has_tool_calls and tool_call_depth < MAX_AUTONOMY_ITERATIONS):
+                if AUTONOMY and has_tool_calls and tool_call_depth >= MAX_AUTONOMY_ITERATIONS:
+                    console.print(
+                        "[yellow]⚠️  Arrêt automatique: limite d'itérations atteinte avant nouveaux tool calls.[/yellow]"
+                    )
+                break
+
+        log_verbose("Réponse de l'assistant ajoutée à l'historique")
 # -----------------------------
 # Main
 # -----------------------------
 def main():
-    global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES, MODEL_NAME, MODEL_NATIVE_TOOLS, MODEL_JSON_FALLBACK
+    global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES, MODEL_NAME, MODEL_NATIVE_TOOLS, MODEL_JSON_FALLBACK, AUTONOMY
     
     parser = argparse.ArgumentParser(description="Ollama Code-Assistant")
     parser.add_argument(
@@ -1354,12 +1334,18 @@ def main():
         default=3,
         help="Nombre maximum de tentatives d'exécution par fichier (par défaut: 3)",
     )
+    parser.add_argument(
+        "--autonomy",
+        action="store_true",
+        help="Active l'autonomie: le modèle enchaîne automatiquement les tool calls sans attente utilisateur",
+    )
     args = parser.parse_args()
     VERBOSE = args.verbose
     REASONING_LEVEL = args.reasoning
     EXEC_TIMEOUT = args.exec_timeout
     MAX_RETRIES = args.max_retries
     MODEL_NAME = args.model
+    AUTONOMY = args.autonomy
 
     compat = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)
     MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
