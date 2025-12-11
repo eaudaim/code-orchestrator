@@ -31,15 +31,3 @@ Cette feuille de route vise à extraire progressivement le code du fichier monol
 - **Documentation** : ajouter un README court par module (objectif, API publique, exemples). Documenter le flux global (collecte → build prompt → parse tools → boucle CLI).
 - **Migrations progressives** : conserver temporairement des wrappers dans `orchestrateur.py` qui appellent les nouveaux modules. Supprimer la duplication uniquement après passage des tests.
 
-## 7) Priorisation et jalons
-1. **Semaine 1** : config + utils (faible risque) → mesure : le script tourne sans modification des réponses.
-2. **Semaine 2** : tools/registry + déplacement des outils existants → mesure : prompt identique, tool-calls inchangés.
-3. **Semaine 3** : prompt builder/parser + ingestion → mesure : même prompt et même parsing sur un diff de référence.
-4. **Semaine 4** : CLI orchestrateur fin → mesure : refactor complet, suppression de l'ancien monolithe après validation des tests.
-
-## 8) Gardes-fous anti-régression
-- Comparer les prompts générés avant/après à l'octet près pour un dossier de test.
-- Capturer un jeu de conversations de référence (questions/réponses) et vérifier la stabilité après chaque tranche.
-- Bloquer toute régression sur les outils exposés : mêmes noms, mêmes paramètres obligatoires, mêmes messages d'erreur.
-
-Cette roadmap permet une migration incrémentale en maintenant la compatibilité des prompts et de la surface d'API visible par le modèle.
