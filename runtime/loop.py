@@ -1,6 +1,5 @@
 import select
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 try:
@@ -33,6 +32,7 @@ from runtime.executor import (
     list_files_tool,
     read_file_tool,
     send_pending_tool_response,
+    WORK_DIR,
     write_file_tool,
 )
 
@@ -345,7 +345,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                     pending_tool_responses,
                 )
                 console.print(f"[dim]   ✍️  Écriture dans : {file_path} (lignes {line_start}-{line_end})[/dim]")
-                file_was_existing = (Path.cwd() / file_path).exists()
+                file_was_existing = (WORK_DIR / file_path).exists()
                 success, result = write_file_tool(file_path, content, line_start, line_end)
                 if AUTONOMY and success and not autonomy_first_successful_write:
                     console.print(
@@ -356,7 +356,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                 if AUTONOMY and success:
                     if not autonomy_first_successful_write:
                         autonomy_first_successful_write = True
-                        git_dir = Path.cwd() / ".git"
+                        git_dir = WORK_DIR / ".git"
                         if not git_dir.exists():
                             init_result = git_init_tool()
                             log_verbose(f"Initialisation git automatique : {init_result[:200]}...")
@@ -447,7 +447,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
             elif function_name == "git_commit":
                 message = arguments.get("message", "")
                 console.print("[dim]   🧰 Commit Git demandé[/dim]")
-                git_dir = Path.cwd() / ".git"
+                git_dir = WORK_DIR / ".git"
                 if not git_dir.exists():
                     result = "[ERROR] Git repository is not initialized. Run git_init first." + " Suggestion: run git_init first."
                     messages.append({"role": "tool", "content": result, "name": function_name})
@@ -478,7 +478,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
             elif function_name == "git_rollback":
                 steps = arguments.get("steps", 1)
                 console.print(f"[dim]   🧰 Rollback Git de {steps} étape(s) demandé[/dim]")
-                git_dir = Path.cwd() / ".git"
+                git_dir = WORK_DIR / ".git"
                 if not git_dir.exists():
                     result = "[ERROR] Git repository is not initialized. Run git_init first." + " Suggestion: run git_init first."
                     messages.append({"role": "tool", "content": result, "name": function_name})

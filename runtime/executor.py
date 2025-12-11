@@ -23,6 +23,7 @@ except Exception:
 
 console = None
 log_verbose = lambda message: None  # noqa: E731
+WORK_DIR = Path.cwd()
 
 
 def set_executor_environment(
@@ -33,8 +34,9 @@ def set_executor_environment(
     max_retries: int,
     autonomy_flag: bool,
     script_name: str,
+    work_dir: Path,
 ) -> None:
-    global console, log_verbose, VERBOSE, EXEC_TIMEOUT, MAX_RETRIES, AUTONOMY, SCRIPT_NAME
+    global console, log_verbose, VERBOSE, EXEC_TIMEOUT, MAX_RETRIES, AUTONOMY, SCRIPT_NAME, WORK_DIR
 
     console = console_obj
     log_verbose = logger
@@ -43,6 +45,7 @@ def set_executor_environment(
     MAX_RETRIES = max_retries
     AUTONOMY = autonomy_flag
     SCRIPT_NAME = script_name
+    WORK_DIR = work_dir
 
 
 def detect_dangerous_patterns(code: str) -> List[str]:
@@ -67,8 +70,7 @@ def detect_dangerous_patterns(code: str) -> List[str]:
 
 
 def read_file_tool(file_path: str) -> str:
-    root = Path.cwd()
-    full_path = (root / file_path).resolve()
+    full_path = (WORK_DIR / file_path).resolve()
 
     if full_path == Path(__file__).resolve() or full_path.name == SCRIPT_NAME:
         return "[ERROR] Reading the orchestrator script is not allowed."
@@ -80,8 +82,7 @@ def read_file_tool(file_path: str) -> str:
 
 def list_files_tool(directory_path: str = ".") -> str:
     try:
-        root = Path.cwd()
-        target_dir = root / directory_path
+        target_dir = WORK_DIR / directory_path
         log_verbose(f"list_files_tool: {target_dir}")
 
         if not target_dir.exists():
@@ -118,7 +119,7 @@ def list_files_tool(directory_path: str = ".") -> str:
                 log_verbose(f"   ⏭️  Exclusion : {item.name}")
                 continue
 
-            relative_path = item.relative_to(root)
+            relative_path = item.relative_to(WORK_DIR)
 
             if item.is_dir():
                 try:
@@ -169,8 +170,8 @@ def write_file_tool(
     line_start: int,
     line_end: int,
 ) -> Tuple[bool, str]:
-    root = Path.cwd()
-    full_path = root / file_path
+    root = WORK_DIR
+    full_path = WORK_DIR / file_path
 
     try:
         full_path = full_path.resolve()
@@ -260,7 +261,7 @@ def write_file_tool(
 
 
 def execute_code_tool(file_path: str) -> str:
-    root = Path.cwd()
+    root = WORK_DIR
     full_path = root / file_path
 
     if not full_path.exists() or not full_path.is_file():
@@ -395,7 +396,7 @@ def execute_code_tool(file_path: str) -> str:
 
 
 def create_venv_tool(venv_path: str = ".venv") -> str:
-    root = Path.cwd()
+    root = WORK_DIR
     venv_dir = root / venv_path
     try:
         venv_dir = venv_dir.resolve()
@@ -624,7 +625,7 @@ def _git_working_tree_status(root: Path):
 
 
 def git_init_tool() -> str:
-    root = Path.cwd()
+    root = WORK_DIR
     git_dir = root / ".git"
 
     if git_dir.exists():
@@ -654,7 +655,7 @@ def git_commit_tool(message: str) -> str:
     if not isinstance(message, str) or not message.strip():
         return "[ERROR] Commit message must be a non-empty string."
 
-    root = Path.cwd()
+    root = WORK_DIR
     git_dir = root / ".git"
 
     if not git_dir.exists():
@@ -716,7 +717,7 @@ def git_rollback_tool(steps: int = 1) -> str:
     if steps_value <= 0:
         return f"[ERROR] Steps must be greater than 0. Got: {steps_value}."
 
-    root = Path.cwd()
+    root = WORK_DIR
     git_dir = root / ".git"
 
     if not git_dir.exists():
@@ -770,7 +771,7 @@ def git_rollback_tool(steps: int = 1) -> str:
 
 
 def git_history_tool() -> str:
-    root = Path.cwd()
+    root = WORK_DIR
     git_dir = root / ".git"
 
     if not git_dir.exists():
