@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 from pathlib import Path
@@ -473,7 +474,11 @@ def write_file_tool(
     console.print("[dim]" + "─" * 60 + "[/dim]")
 
     # Confirmation utilisateur
-    confirmation = input("Autoriser cette modification ? (o/n) : ")
+    if AUTONOMY:
+        console.print("[dim]🤖 Mode autonomie: modification appliquée sans confirmation utilisateur.[/dim]")
+        confirmation = "o"
+    else:
+        confirmation = input("Autoriser cette modification ? (o/n) : ")
 
     if confirmation.lower() not in ["o", "oui", "y", "yes"]:
         return "[CANCELLED] User cancelled the file modification."
@@ -542,9 +547,13 @@ def execute_code_tool(file_path: str) -> str:
     console.print(preview)
     console.print("[dim]" + "─" * 60 + "[/dim]")
     
-    # Demander confirmation
-    confirmation = input("Autoriser l'exécution ? (o/n) : ")
-    
+    # Demander confirmation sauf en autonomie
+    if AUTONOMY:
+        console.print("[dim]🤖 Mode autonomie: exécution autorisée sans confirmation utilisateur.[/dim]")
+        confirmation = "o"
+    else:
+        confirmation = input("Autoriser l'exécution ? (o/n) : ")
+
     if confirmation.lower() not in ['o', 'oui', 'y', 'yes']:
         return "[CANCELLED] User cancelled the execution."
     
@@ -808,6 +817,7 @@ def chat_loop(files_data: Dict[str, str]):
     le modèle répond. Si le modèle demande d'appeler une fonction,
     nous la gérons ici.
     """
+    global AUTONOMY
     # Ollama préfère un message initial "user" plutôt que "system"
     initial_context = build_prompt(files_data, native_tools=MODEL_NATIVE_TOOLS)
     
@@ -816,6 +826,38 @@ def chat_loop(files_data: Dict[str, str]):
     console.print(f"[dim]🛠️  Le modèle peut lire, modifier et exécuter des fichiers (avec votre confirmation)[/dim]")
     console.print(f"[dim]⏱️  Timeout d'exécution : {EXEC_TIMEOUT}s | Max tentatives : {MAX_RETRIES}[/dim]")
     console.print(f"[dim]💡 Tip: Le modèle utilisera les outils automatiquement, pas besoin de les demander explicitement[/dim]")
+
+    def wait_for_manual_override(timeout: int) -> bool:
+        """Pause en mode autonomie pour permettre à l'utilisateur de reprendre la main."""
+
+        console.print(
+            f"[cyan]⏳ Autonomie : appuyez sur une touche dans les {timeout}s pour reprendre le contrôle.[/cyan]"
+        )
+        console.print("[dim]Passé ce délai, l'exécution automatique se poursuit.[/dim]")
+
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        except Exception as e:
+            log_verbose(f"Impossible de surveiller l'entrée utilisateur pendant l'autonomie : {e}")
+            return False
+
+        if ready:
+            try:
+                sys.stdin.readline()
+            except Exception:
+                pass
+            console.print(
+                "[green]🎛️ Reprise manuelle détectée : le mode autonomie est désactivé pour cette session.[/green]"
+            )
+            return True
+
+        console.print("[dim]⏭️  Aucun input détecté, poursuite de l'autonomie.[/dim]")
+        return False
+
+    def show_autonomy_banner(iteration: int, limit: int) -> None:
+        """Affiche l'état de l'autonomie avant chaque appel au modèle."""
+
+        console.print(f"[yellow]🤖 AUTONOMIE ON - Itération {iteration}/{limit}[/yellow]")
 
     def call_model_and_stream(current_messages: List[Dict]) -> Tuple[Dict, bool, List[Dict]]:
         """Appelle le modèle et gère le streaming, retourne le message assistant et les tool calls."""
@@ -914,6 +956,7 @@ def chat_loop(files_data: Dict[str, str]):
     execution_count = {}  # Track executions per question (multi-actions prêt)
     pending_tool_responses: Set[Tuple[str, str]] = set()
     tool_call_depth = 0  # Limite la profondeur des appels automatiques (compatible autonomie)
+    autonomy_call_counter = 0
     while True:
         # Réaffiche l'invite utilisateur avant chaque interaction
         console.print("\n[bold green]Vous> [/bold green]", end="")
@@ -945,6 +988,7 @@ def chat_loop(files_data: Dict[str, str]):
         # Reset execution count for new question
         execution_count = {}
         tool_call_depth = 0  # Reset pour nouvelle question
+        autonomy_call_counter = 0
         # Premier message : on inclut le contexte
         if not context_sent:
             full_message = f"{initial_context}\n\n---\n\nUser question: {user_input}"
@@ -954,7 +998,11 @@ def chat_loop(files_data: Dict[str, str]):
         else:
             messages.append({"role": "user", "content": user_input})
             log_verbose(f"Message utilisateur ajouté : {user_input[:100]}...")
+        if AUTONOMY:
+            show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
         assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+        if AUTONOMY:
+            autonomy_call_counter += 1
         messages.append(assistant_message)
 
         while has_tool_calls and tool_call_depth < MAX_AUTONOMY_ITERATIONS:
@@ -1275,14 +1323,29 @@ ONLY use the tools listed above. No exceptions."""
                     messages.append({"role": "user", "content": user_input})
                     execution_count = {}
                     tool_call_depth = 0
+                    if AUTONOMY:
+                        show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
                     assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+                    if AUTONOMY:
+                        autonomy_call_counter += 1
                     messages.append(assistant_message)
                     if not has_tool_calls:
                         break
                 else:
                     log_verbose("L'utilisateur a confirmé la poursuite des actions.")
 
+            if AUTONOMY:
+                if wait_for_manual_override(AUTONOMY_TIMEOUT):
+                    AUTONOMY = False
+                    has_tool_calls = False
+                    console.print("[yellow]↩️ Retour à l'invite manuelle : en attente de votre prochaine instruction.[/yellow]")
+                    break
+
+            if AUTONOMY:
+                show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
             assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+            if AUTONOMY:
+                autonomy_call_counter += 1
             messages.append(assistant_message)
 
             if not (AUTONOMY and has_tool_calls and tool_call_depth < MAX_AUTONOMY_ITERATIONS):
@@ -1299,7 +1362,9 @@ ONLY use the tools listed above. No exceptions."""
 def main():
     global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES, MODEL_NAME, MODEL_NATIVE_TOOLS, MODEL_JSON_FALLBACK, AUTONOMY
     
-    parser = argparse.ArgumentParser(description="Ollama Code-Assistant")
+    parser = argparse.ArgumentParser(
+        description="Ollama Code-Assistant (utilisez --autonomy pour enchaîner les tool calls sans confirmation)"
+    )
     parser.add_argument(
         "directory",
         nargs="?",
