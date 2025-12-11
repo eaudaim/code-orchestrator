@@ -33,7 +33,7 @@ console = Console(force_terminal=True)
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_NAME = "qwen2.5-coder:14b"
+MODEL_NAME = "gpt-oss:20b"
 # Configuration de compatibilité par modèle
 MODEL_COMPAT = {
     "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
@@ -52,7 +52,7 @@ EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
 MAX_RETRIES = 3  # Nombre maximum de tentatives d'exécution
 MAX_AUTONOMY_ITERATIONS = 20  # Nombre max d'itérations autonomes
 AUTONOMY_TIMEOUT = 5  # Timeout entre itérations autonomes (secondes)
-AUTONOMY = False  # Mode autonomie (enchaînement automatique des tool calls)
+AUTONOMY = True  # Mode autonomie (enchaînement automatique des tool calls)
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -158,12 +158,13 @@ def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
         "• write_file('f.py', 'code', 10, 20)    ← REPLACE lines 10-20",
         "",
         "=== MANDATORY WORKFLOW - NO SHORTCUTS ===",
-        "For ANY task, you MUST follow this exact sequence:",
+        "For ANY CODING TASK, you MUST follow this exact sequence:",
         "1. 🔍 EXPLORE: Call list_files() to understand project structure",
         "2. 📖 READ: Call read_file() on relevant files to understand current code",
         "3. 📊 ANALYZE: Think through what changes are needed",
         "4. ✏️ IMPLEMENT: Use write_file() with precise line numbers",
         "5. ✅ VERIFY: Use execute_code() or read_file() to confirm changes",
+        "if the task does not involve writing code, you are not forced to follow this sequence"
         "",
         "=== CRITICAL BEHAVIORAL RULES ===",
         "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
