@@ -180,6 +180,12 @@ def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
         "• Craft descriptive commit messages (what changed and why)",
         "• Keep commits atomic per file or tightly related change to simplify rollbacks",
         "• Before any rollback, call git_history to review the latest commits",
+        "=== MANDATORY GIT DISCIPLINE ===",
+        "• After each write_file, check git status via git_history",
+        "• Commit frequently to maintain clean worktree ,"
+        "• If errors occur on multi-file changes, use git_rollback before continuing ,"
+        "• Only committed code is safe - uncommitted work can be lost ,"
+        "• Never amend commits - create new commits instead" ,
         "=== CRITICAL BEHAVIORAL RULES ===",
         "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
         "• NEVER take shortcuts or assume previous work",
@@ -933,6 +939,12 @@ def git_init_tool() -> str:
     output = "\n".join(filter(None, [stdout, stderr]))
 
     if result and result.returncode == 0:
+
+        gitignore_path = root / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(f"{SCRIPT_NAME}\n")
+
+        
         return "[GIT] Repository initialized successfully." + (f"\n{output}" if output else "")
 
     return (
