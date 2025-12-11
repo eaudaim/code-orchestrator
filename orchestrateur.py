@@ -1110,6 +1110,17 @@ def chat_loop(files_data: Dict[str, str]):
 
         console.print(f"[yellow]🤖 AUTONOMIE ON - Itération {iteration}/{limit}[/yellow]")
 
+    def is_affirmative(value: Any) -> bool:
+        """Interprète une valeur comme confirmation explicite (true/oui/yes/1)."""
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"o", "oui", "y", "yes", "true", "1"}
+        return False
+
     def call_model_and_stream(current_messages: List[Dict]) -> Tuple[Dict, bool, List[Dict]]:
         """Appelle le modèle et gère le streaming, retourne le message assistant et les tool calls."""
         console.print("[dim]🤖 Le modèle réfléchit...[/dim]")
@@ -1601,7 +1612,27 @@ ONLY use the tools listed above. No exceptions."""
                 elif function_name == "git_commit":
                     message = arguments.get("message", "")
                     console.print("[dim]   🧰 Commit Git demandé[/dim]")
-                    result = git_commit_tool(message)
+                    pending_key = message or "<commit-message>"
+                    if AUTONOMY or is_affirmative(arguments.get("confirm")):
+                        result = git_commit_tool(message)
+                    else:
+                        send_pending_tool_response(
+                            messages,
+                            function_name,
+                            pending_key,
+                            pending_tool_responses,
+                        )
+                        console.print(
+                            "[yellow]⚠️ Confirmation requise pour appliquer le commit.[/yellow]"
+                        )
+                        confirmation = input(
+                            f"Confirmer le commit git avec le message \"{message}\" ? (o/n) : "
+                        )
+                        if is_affirmative(confirmation):
+                            result = git_commit_tool(message)
+                        else:
+                            result = "[CANCELLED] Git commit cancelled by user."
+                    pending_tool_responses.discard((function_name, pending_key))
                     log_verbose(f"Résultat git_commit : {result[:200]}...")
                     messages.append({
                         "role": "tool",
@@ -1612,14 +1643,25 @@ ONLY use the tools listed above. No exceptions."""
                 elif function_name == "git_rollback":
                     steps = arguments.get("steps", 1)
                     console.print(f"[dim]   🧰 Rollback Git de {steps} étape(s) demandé[/dim]")
-                    if AUTONOMY:
+                    pending_key = f"rollback-{steps}"
+                    if AUTONOMY or is_affirmative(arguments.get("confirm")):
                         result = git_rollback_tool(steps)
                     else:
+                        send_pending_tool_response(
+                            messages,
+                            function_name,
+                            pending_key,
+                            pending_tool_responses,
+                        )
+                        console.print(
+                            "[yellow]⚠️ Rollback Git destructif mis en attente de confirmation utilisateur.[/yellow]"
+                        )
                         confirmation = input("Confirmer le rollback git ? (o/n) : ")
-                        if confirmation.lower() not in {"o", "oui", "y", "yes"}:
-                            result = "[CANCELLED] Git rollback cancelled by user."
-                        else:
+                        if is_affirmative(confirmation):
                             result = git_rollback_tool(steps)
+                        else:
+                            result = "[CANCELLED] Git rollback cancelled by user."
+                    pending_tool_responses.discard((function_name, pending_key))
                     log_verbose(f"Résultat git_rollback : {result[:200]}...")
                     messages.append({
                         "role": "tool",
