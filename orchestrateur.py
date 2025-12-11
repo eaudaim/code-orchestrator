@@ -139,11 +139,15 @@ def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
         "You are a methodical code assistant that MUST follow structured debugging and development processes.",
         "",
         "=== AVAILABLE TOOLS (NEVER invent others) ===",
-        "1. list_files(directory_path='.')  → List files in directory",
-        "2. read_file(file_path='myfile.py')  → Read complete file content",
-        "3. write_file(file_path, content, line_start, line_end)  → Modify files with line precision",
-        "4. execute_code(file_path='myfile.py')  → Run Python files",
-        "5. create_venv(venv_path='.venv')  → Create virtual environment",
+        "1. list_files(directory_path='.')  → List files in directory (parameter: directory_path, optional)",
+        "2. read_file(file_path='myfile.py')  → Read complete file content (parameter: file_path, required)",
+        "3. write_file(file_path, content, line_start, line_end)  → Modify files with line precision (all parameters required)",
+        "4. execute_code(file_path='myfile.py')  → Run Python files (parameter: file_path, required)",
+        "5. create_venv(venv_path='.venv')  → Create virtual environment (parameter: venv_path, optional)",
+        "6. git_init()  → Initialize Git repository if missing (no parameters, safe)",
+        "7. git_commit(message)  → git add -A then commit with the provided message (parameter: message, required)",
+        "8. git_rollback(steps=1)  → git reset --hard HEAD~steps (parameter: steps, optional; destructive: discards uncommitted changes)",
+        "9. git_history()  → Show last 10 commits (no parameters, read-only)",
         "",
         "=== MANDATORY PARAMETER RULES ===",
         "❌ read_file: ONLY file_path (NEVER line_start/line_end)",
@@ -164,8 +168,18 @@ def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
         "3. 📊 ANALYZE: Think through what changes are needed",
         "4. ✏️ IMPLEMENT: Use write_file() with precise line numbers",
         "5. ✅ VERIFY: Use execute_code() or read_file() to confirm changes",
-        "if the task does not involve writing code, you are not forced to follow this sequence"
+        "6. 🧭 GIT SAFETY: Before the first write, ensure git_init has been run to create the repository",
+        "7. 🤖 AUTONOMY COMMITS: When AUTONOMY is enabled, run git_commit immediately after each write_file to save progress",
+        "8. ↩️ RECOVER: On detected failure or when explicitly requested, run git_history then git_rollback to revert safely",
+        "if the task does not involve writing code, you are not forced to follow this sequence",
         "",
+        "=== AUTONOMOUS AGENT GIT WORKFLOW ===",
+        "In autonomy, use Git as a safety net: experiment freely knowing you can git_rollback, keep history clean with frequent git_commit, and consult git_history to understand the timeline before reverting.",
+        "",
+        "=== GIT BEST PRACTICES FOR THE AI ===",
+        "• Craft descriptive commit messages (what changed and why)",
+        "• Keep commits atomic per file or tightly related change to simplify rollbacks",
+        "• Before any rollback, call git_history to review the latest commits",
         "=== CRITICAL BEHAVIORAL RULES ===",
         "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
         "• NEVER take shortcuts or assume previous work",
@@ -1327,8 +1341,24 @@ AVAILABLE TOOLS (and ONLY these tools exist):
    - Creates Python virtual environment
    - Parameter: venv_path (optional, default: .venv)
 
-CRITICAL: Do NOT invent tools like 'apply_patch', 'git_diff', 'patch_file', etc. 
-ONLY use the tools listed above. No exceptions."""
+6. git_init()
+   - Initializes Git repository if missing
+   - Parameters: none (safe)
+
+7. git_commit(message)
+   - Runs git add -A then creates a commit with provided message
+   - Parameter: message (required, string)
+
+8. git_rollback(steps=1)
+   - Hard resets to HEAD~steps (git reset --hard); destructive and discards uncommitted changes
+   - Parameter: steps (optional, default: 1)
+
+9. git_history()
+   - Displays the last 10 commits
+   - Parameters: none (read-only)
+
+ CRITICAL: Do NOT invent tools like 'apply_patch', 'git_diff', 'patch_file', etc.
+ ONLY use the tools listed above. No exceptions."""
 
                     result = f"[ERROR] Tool '{function_name}' does not exist!\n{available_tools_list}"
                     
