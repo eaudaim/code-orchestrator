@@ -763,6 +763,34 @@ def _run_git_command(args: List[str], root: Path):
     return result, stdout, stderr, ""
 
 
+def _git_not_initialized_message() -> str:
+    return "[ERROR] Git repository is not initialized. Run git_init first."
+
+
+def _git_working_tree_status(root: Path):
+    """Retourne le statut git (porcelain) ou un message d'erreur formaté."""
+
+    status_result, status_stdout, status_stderr, error_msg = _run_git_command(
+        ["status", "--porcelain"],
+        root,
+    )
+
+    if error_msg:
+        return None, error_msg
+
+    combined = "\n".join(filter(None, [status_stdout, status_stderr]))
+
+    if not status_result:
+        return None, f"[ERROR] Failed to query git status.\n{combined}" if combined else "[ERROR] Failed to query git status."
+
+    if status_result.returncode != 0:
+        return None, f"[ERROR] Git status failed with code {status_result.returncode}.\n{combined}" if combined else (
+            f"[ERROR] Git status failed with code {status_result.returncode}."
+        )
+
+    return status_result, combined
+
+
 def git_init_tool() -> str:
     """Initialise un dépôt Git si nécessaire."""
 
@@ -798,7 +826,14 @@ def git_commit_tool(message: str) -> str:
     git_dir = root / ".git"
 
     if not git_dir.exists():
-        return "[ERROR] Git repository is not initialized. Run git_init first."
+        return _git_not_initialized_message()
+
+    status_result, status_output = _git_working_tree_status(root)
+    if not status_result:
+        return status_output
+
+    if not status_output.strip():
+        return "[GIT] Nothing to commit: working tree clean. Use write_file before committing."
 
     add_result, add_stdout, add_stderr, error_msg = _run_git_command(["add", "-A"], root)
 
@@ -845,7 +880,7 @@ def git_rollback_tool(steps: int = 1) -> str:
     git_dir = root / ".git"
 
     if not git_dir.exists():
-        return "[ERROR] Git repository is not initialized. Run git_init first."
+        return _git_not_initialized_message()
 
     count_result, count_stdout, count_stderr, error_msg = _run_git_command(
         ["rev-list", "--count", "HEAD"],
@@ -899,7 +934,7 @@ def git_history_tool() -> str:
     git_dir = root / ".git"
 
     if not git_dir.exists():
-        return "[ERROR] Git repository is not initialized. Run git_init first."
+        return _git_not_initialized_message()
 
     count_result, count_stdout, count_stderr, error_msg = _run_git_command(
         ["rev-list", "--count", "HEAD"],
@@ -1642,6 +1677,16 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                 elif function_name == "git_commit":
                     message = arguments.get("message", "")
                     console.print("[dim]   🧰 Commit Git demandé[/dim]")
+                    git_dir = Path.cwd() / ".git"
+                    if not git_dir.exists():
+                        result = _git_not_initialized_message() + " Suggestion: run git_init first."
+                        messages.append({
+                            "role": "tool",
+                            "content": result,
+                            "name": function_name,
+                        })
+                        continue
+
                     pending_key = message or "<commit-message>"
                     if AUTONOMY or is_affirmative(arguments.get("confirm")):
                         result = git_commit_tool(message)
@@ -1673,6 +1718,16 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                 elif function_name == "git_rollback":
                     steps = arguments.get("steps", 1)
                     console.print(f"[dim]   🧰 Rollback Git de {steps} étape(s) demandé[/dim]")
+                    git_dir = Path.cwd() / ".git"
+                    if not git_dir.exists():
+                        result = _git_not_initialized_message() + " Suggestion: run git_init first."
+                        messages.append({
+                            "role": "tool",
+                            "content": result,
+                            "name": function_name,
+                        })
+                        continue
+
                     pending_key = f"rollback-{steps}"
                     if AUTONOMY or is_affirmative(arguments.get("confirm")):
                         result = git_rollback_tool(steps)
