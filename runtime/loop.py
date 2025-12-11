@@ -533,7 +533,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                 tool_call_depth = 0
                 if AUTONOMY:
                     show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
-                assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+                assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages, MODEL_NAME, REASONING_LEVEL)
                 if AUTONOMY:
                     autonomy_call_counter += 1
                 messages.append(assistant_message)
@@ -553,7 +553,7 @@ AVAILABLE TOOLS (and ONLY these tools exist):
 
         if AUTONOMY:
             show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
-        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages, MODEL_NAME, REASONING_LEVEL)
         if AUTONOMY:
             autonomy_call_counter += 1
         messages.append(assistant_message)
