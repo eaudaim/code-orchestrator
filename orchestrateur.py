@@ -744,7 +744,10 @@ def _run_git_command(args: List[str], root: Path):
             timeout=EXEC_TIMEOUT,
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin"},
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                **({"HOME": os.environ["HOME"]} if "HOME" in os.environ else {}),
+            },
         )
     except subprocess.TimeoutExpired:
         return (
@@ -765,6 +768,111 @@ def _run_git_command(args: List[str], root: Path):
 
 def _git_not_initialized_message() -> str:
     return "[ERROR] Git repository is not initialized. Run git_init first."
+
+
+def _git_get_config_value(key: str, root: Path, scope: str = "local"):
+    args = ["config"]
+
+    if scope == "local":
+        args.append("--local")
+    elif scope == "global":
+        args.append("--global")
+
+    args.extend(["--get", key])
+
+    result, stdout, stderr, error_msg = _run_git_command(args, root)
+
+    if error_msg:
+        return None, error_msg
+
+    if not result:
+        return None, f"[ERROR] Unable to run git config for {key}."
+
+    if result.returncode == 0:
+        return stdout.strip(), None
+
+    if result.returncode == 1:
+        # Configuration absente pour cette portée
+        return None, None
+
+    combined_output = "\n".join(filter(None, [stdout, stderr]))
+    return (
+        None,
+        f"[ERROR] git config failed for {key} with code {result.returncode}."
+        + (f"\n{combined_output}" if combined_output else ""),
+    )
+
+
+def _git_set_config_value(key: str, value: str, root: Path):
+    result, stdout, stderr, error_msg = _run_git_command(["config", key, value], root)
+
+    if error_msg:
+        return False, error_msg
+
+    if not result or result.returncode != 0:
+        combined_output = "\n".join(filter(None, [stdout, stderr]))
+        return (
+            False,
+            f"[ERROR] Unable to set git config {key} (code {result.returncode if result else 'unknown'})."
+            + (f"\n{combined_output}" if combined_output else ""),
+        )
+
+    return True, ""
+
+
+def git_ensure_identity(root: Path) -> Tuple[bool, str]:
+    git_dir = root / ".git"
+
+    if not git_dir.exists():
+        return False, _git_not_initialized_message()
+
+    local_name, local_name_err = _git_get_config_value("user.name", root, scope="local")
+    if local_name_err:
+        return False, local_name_err
+
+    local_email, local_email_err = _git_get_config_value("user.email", root, scope="local")
+    if local_email_err:
+        return False, local_email_err
+
+    global_name, global_name_err = _git_get_config_value("user.name", root, scope="global")
+    if global_name_err:
+        return False, global_name_err
+
+    global_email, global_email_err = _git_get_config_value("user.email", root, scope="global")
+    if global_email_err:
+        return False, global_email_err
+
+    effective_name = local_name or global_name
+    effective_email = local_email or global_email
+
+    if effective_name and effective_email:
+        name_source = "local" if local_name else "global"
+        email_source = "local" if local_email else "global"
+
+        if name_source == email_source == "local":
+            message = f"[GIT] Using local git identity: {effective_name} <{effective_email}>."
+        elif name_source == email_source == "global":
+            message = f"[GIT] Using global git identity: {effective_name} <{effective_email}>."
+        else:
+            message = (
+                "[GIT] Using git identity from configuration: "
+                f"name={effective_name} ({name_source}), email={effective_email} ({email_source})."
+            )
+
+        return True, message
+
+    temp_name = "AI Code Assistant"
+    temp_email = "ai@example.com"
+
+    name_ok, name_msg = _git_set_config_value("user.name", temp_name, root)
+    if not name_ok:
+        return False, name_msg
+
+    email_ok, email_msg = _git_set_config_value("user.email", temp_email, root)
+    if not email_ok:
+        return False, email_msg
+
+    return True, f"[GIT] Temporary local git identity configured: {temp_name} <{temp_email}>."
 
 
 def _git_working_tree_status(root: Path):
@@ -828,12 +936,20 @@ def git_commit_tool(message: str) -> str:
     if not git_dir.exists():
         return _git_not_initialized_message()
 
+    identity_ok, identity_message = git_ensure_identity(root)
+
+    if not identity_ok:
+        return identity_message
+
     status_result, status_output = _git_working_tree_status(root)
     if not status_result:
         return status_output
 
     if not status_output.strip():
-        return "[GIT] Nothing to commit: working tree clean. Use write_file before committing."
+        return (
+            (identity_message + "\n") if identity_message else ""
+            + "[GIT] Nothing to commit: working tree clean. Use write_file before committing."
+        )
 
     add_result, add_stdout, add_stderr, error_msg = _run_git_command(["add", "-A"], root)
 
@@ -854,10 +970,12 @@ def git_commit_tool(message: str) -> str:
     commit_text = (commit_stdout + "\n" + commit_stderr).lower()
 
     if commit_result and commit_result.returncode == 0:
-        return "[GIT] Commit created successfully." + (f"\n{combined_output}" if combined_output else "")
+        prefix = (identity_message + "\n") if identity_message else ""
+        return prefix + "[GIT] Commit created successfully." + (f"\n{combined_output}" if combined_output else "")
 
     if "nothing to commit" in commit_text:
-        return "[GIT] Nothing to commit: working tree clean."
+        prefix = (identity_message + "\n") if identity_message else ""
+        return prefix + "[GIT] Nothing to commit: working tree clean."
 
     return (
         f"[ERROR] Git commit failed with return code {commit_result.returncode if commit_result else 'unknown'}."
