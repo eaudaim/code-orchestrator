@@ -45,7 +45,7 @@ MODEL_NATIVE_TOOLS = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["native_
 MODEL_JSON_FALLBACK = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["json_fallback"]
 MAX_BYTES_PER_FILE = 500 * 1024  # 500 KB par défaut
 MAX_TOTAL_BYTES = 5 * 1024 * 1024  # 5 Mo max total envoyés au modèle
-SCRIPT_NAME = "analyse_fichiers_llm.py"  # Nom du script à exclure
+SCRIPT_NAME = Path(__file__).name  # Nom du script à exclure
 VERBOSE = False  # Mode verbeux (défini par argument CLI)
 REASONING_LEVEL = "medium"  # Niveau de réflexion : low, medium, high
 EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
@@ -198,6 +198,11 @@ def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
             "Do NOT wrap the JSON in prose. No markdown, no extra text.",
         ])
 
+    if not files_data:
+        parts.append(
+            "[Context notice] Initial context is empty: no files were loaded. Provide starting steps or new files to bootstrap the project."
+        )
+
     parts.append("")
     parts.append("Current files in repository:")
     
@@ -316,7 +321,11 @@ def read_file_tool(file_path: str) -> str:
     (utilisée via le tool-calling d'Ollama).
     """
     root = Path.cwd()
-    full_path = root / file_path
+    full_path = (root / file_path).resolve()
+
+    if full_path == Path(__file__).resolve() or full_path.name == SCRIPT_NAME:
+        return "[ERROR] Reading the orchestrator script is not allowed."
+
     if not full_path.exists() or not full_path.is_file():
         return f"[ERROR] File '{file_path}' not found."
     return read_file(full_path)
@@ -351,9 +360,15 @@ def list_files_tool(directory_path: str = ".") -> str:
             # Ignorer les fichiers/dossiers exclus
             if any(pattern in str(item.name) for pattern in excluded_patterns):
                 continue
-                
+
+            if item.is_file() and (
+                item.name == SCRIPT_NAME or item.resolve() == Path(__file__).resolve()
+            ):
+                log_verbose(f"   ⏭️  Exclusion : {item.name}")
+                continue
+
             relative_path = item.relative_to(root)
-            
+
             if item.is_dir():
                 # Compter les fichiers dans le dossier
                 try:
@@ -2023,8 +2038,9 @@ def main():
         sys.exit(1)
     files_data = collect_files(root)
     if not files_data:
-        console.print("[red]❌ Aucun fichier pertinent trouvé. Arrêt.[/red]")
-        sys.exit(1)
+        console.print(
+            "[yellow]ℹ️  Aucun fichier pertinent collecté ; démarrage avec un contexte initial vide.[/yellow]"
+        )
     # On passe en mode chat
     chat_loop(files_data)
 if __name__ == "__main__":
