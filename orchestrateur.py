@@ -28,9 +28,12 @@ from typing import Any, Dict, List, Set, Tuple
 import ollama
 from rich.console import Console
 from rich.markdown import Markdown
+from core.model import call_model_and_stream, set_model_context
+from core.prompt import build_prompt, set_prompt_console
 from utils.file_utils import collect_files, read_file
 
 console = Console(force_terminal=True)
+set_prompt_console(console)
 # -----------------------------
 # Configuration
 # -----------------------------
@@ -84,95 +87,6 @@ def log_verbose(message: str):
     """Affiche un message uniquement si VERBOSE est activé."""
     if VERBOSE:
         console.print(f"[dim magenta]🔍 DEBUG: {message}[/dim magenta]")
-def build_prompt(files_data: Dict[str, str], native_tools: bool = True) -> str:
-    """
-    Construit un prompt structuré à envoyer au modèle.
-    On sépare chaque fichier par un délimiteur clair.
-    """
-    parts = [
-        "You are a methodical code assistant that MUST follow structured debugging and development processes.",
-        "",
-        "=== AVAILABLE TOOLS (NEVER invent others) ===",
-        "1. list_files(directory_path='.')  → List files in directory (parameter: directory_path, optional)",
-        "2. read_file(file_path='myfile.py')  → Read complete file content (parameter: file_path, required)",
-        "3. write_file(file_path, content, line_start, line_end)  → Modify files with line precision (all parameters required)",
-        "4. execute_code(file_path='myfile.py')  → Run Python files (parameter: file_path, required)",
-        "5. create_venv(venv_path='.venv')  → Create virtual environment (parameter: venv_path, optional)",
-        "6. git_init()  → Initialize Git repository if missing (no parameters, safe)",
-        "7. git_commit(message)  → git add -A then commit with the provided message (parameter: message, required)",
-        "8. git_rollback(steps=1)  → git reset --hard HEAD~steps (parameter: steps, optional; destructive: discards uncommitted changes)",
-        "9. git_history()  → Show last 10 commits (no parameters, read-only)",
-        "",
-        "=== MANDATORY PARAMETER RULES ===",
-        "❌ read_file: ONLY file_path (NEVER line_start/line_end)",
-        "✅ write_file: ALL 4 parameters required (file_path, content, line_start, line_end)",
-        "✅ list_files: directory_path only (optional, default='.')",
-        "✅ execute_code: file_path only",
-        "✅ create_venv: venv_path only (optional, default='.venv')",
-        "",
-        "=== WRITE_FILE LINE EXAMPLES ===",
-        "• write_file('f.py', 'code', 1, -1)     ← Replace ENTIRE file",
-        "• write_file('f.py', 'code', 50, 49)    ← INSERT at line 50 (no deletion)",
-        "• write_file('f.py', 'code', 10, 20)    ← REPLACE lines 10-20",
-        "",
-        "=== MANDATORY WORKFLOW - NO SHORTCUTS ===",
-        "For ANY CODING TASK, you MUST follow this exact sequence:",
-        "1. 🔍 EXPLORE: Call list_files() to understand project structure",
-        "2. 📖 READ: Call read_file() on relevant files to understand current code",
-        "3. 📊 ANALYZE: Think through what changes are needed",
-        "4. ✏️ IMPLEMENT: Use write_file() with precise line numbers",
-        "5. ✅ VERIFY: Use execute_code() or read_file() to confirm changes",
-        "6. 🧭 GIT SAFETY: Before the first write, ensure git_init has been run to create the repository",
-        "7. 🤖 AUTONOMY COMMITS: When AUTONOMY is enabled, run git_commit immediately after each write_file to save progress",
-        "8. ↩️ RECOVER: On detected failure or when explicitly requested, run git_history then git_rollback to revert safely",
-        "if the task does not involve writing code, you are not forced to follow this sequence",
-        "",
-        "=== AUTONOMOUS AGENT GIT WORKFLOW ===",
-        "In autonomy, use Git as a safety net: experiment freely knowing you can git_rollback, keep history clean with frequent git_commit, and consult git_history to understand the timeline before reverting.",
-        "",
-        "=== GIT BEST PRACTICES FOR THE AI ===",
-        "• Craft descriptive commit messages (what changed and why)",
-        "• Keep commits atomic per file or tightly related change to simplify rollbacks",
-        "• Before any rollback, call git_history to review the latest commits",
-        "=== MANDATORY GIT DISCIPLINE ===",
-        "• After each write_file, check git status via git_history",
-        "• Commit frequently to maintain clean worktree ,"
-        "• If errors occur on multi-file changes, use git_rollback before continuing ,"
-        "• Only committed code is safe - uncommitted work can be lost ,"
-        "• Never amend commits - create new commits instead" ,
-        "=== CRITICAL BEHAVIORAL RULES ===",
-        "• NEVER say 'already did' - ALWAYS execute the requested tool calls",
-        "• NEVER take shortcuts or assume previous work",
-        "• ALWAYS read files before modifying them to count lines",
-        "• NEVER invent tools or use tools that don't exist",
-        "• Each tool call must have a clear purpose and be executed",
-        "• Follow the 5-step workflow for every code task",
-    ]
-
-    if not native_tools:
-        parts.extend([
-            "",
-            "=== TOOL CALL FORMAT (JSON OUTPUT ONLY) ===",
-            "When you need a tool, respond *only* with JSON objects using the schema: {\"name\": \"tool_name\", \"arguments\": { ... }}",
-            "For multiple tool calls, return an array of such objects.",
-            "Do NOT wrap the JSON in prose. No markdown, no extra text.",
-        ])
-
-    if not files_data:
-        parts.append(
-            "[Context notice] Initial context is empty: no files were loaded. Provide starting steps or new files to bootstrap the project."
-        )
-
-    parts.append("")
-    parts.append("Current files in repository:")
-    
-    for filename, content in files_data.items():
-        parts.append(f"--- {filename} ---")
-        parts.append(content)
-    
-    final_prompt = "\n\n".join(parts)
-    console.print(f"[dim]📏 Prompt total : {len(final_prompt)} caractères[/dim]")
-    return final_prompt
 def detect_dangerous_patterns(code: str) -> List[str]:
     """
     Détecte des patterns potentiellement dangereux dans le code.
@@ -1184,6 +1098,14 @@ CRITICAL: ALWAYS read file first to count lines and understand structure.""",
         },
     },
 ]
+set_model_context(
+    TOOLS,
+    MODEL_NATIVE_TOOLS,
+    MODEL_JSON_FALLBACK,
+    debug_logger=log_verbose,
+    shared_console=console,
+    json_parser=parse_json_tool_calls,
+)
 def send_pending_tool_response(
     messages: List[Dict],
     function_name: str,
@@ -1271,98 +1193,6 @@ def chat_loop(files_data: Dict[str, str]):
             return value.strip().lower() in {"o", "oui", "y", "yes", "true", "1"}
         return False
 
-    def call_model_and_stream(current_messages: List[Dict]) -> Tuple[Dict, bool, List[Dict]]:
-        """Appelle le modèle et gère le streaming, retourne le message assistant et les tool calls."""
-        console.print("[dim]🤖 Le modèle réfléchit...[/dim]")
-        log_verbose(f"Nombre de messages dans l'historique : {len(current_messages)}")
-
-        try:
-            log_verbose(f"Appel à ollama.chat() avec modèle {MODEL_NAME}, reasoning={REASONING_LEVEL}")
-            ollama_params = {
-                "model": MODEL_NAME,
-                "messages": current_messages,
-                "stream": True,
-                "options": {
-                    "num_ctx": 16384,  # Contexte maximum pour gpt-oss
-                    "temperature": 0.2,  # Encore plus strict
-                    "repeat_penalty": 1.3,  # Anti-répétition
-                },
-            }
-            if MODEL_NATIVE_TOOLS:
-                ollama_params["tools"] = TOOLS
-
-            response = ollama.chat(**ollama_params)
-            log_verbose("Réponse du modèle reçue, début du streaming")
-        except Exception as e:
-            console.print(f"[red]❌ Erreur lors de l'appel au modèle : {e}[/red]")
-            log_verbose(f"Exception complète : {e}")
-            return {"role": "assistant", "content": ""}, False, []
-
-        assistant_content = ""
-        thinking_content = ""
-        has_tool_calls = False
-        tool_calls_data: List[Dict] = []
-
-        chunk_count = 0
-        is_thinking = False
-
-        console.print("[bold blue]Assistant> [/bold blue]")
-        for chunk in response:
-            chunk_count += 1
-            log_verbose(f"Chunk #{chunk_count} reçu : {chunk}")
-
-            if "message" not in chunk:
-                continue
-
-            msg = chunk["message"]
-
-            if "thinking" in msg and msg["thinking"]:
-                thinking_part = msg["thinking"]
-                thinking_content += thinking_part
-                if not is_thinking:
-                    console.print("[dim cyan]💭 Réflexion en cours...[/dim cyan]", end="")
-                    is_thinking = True
-                console.print(thinking_part, end="")
-
-            if "content" in msg and msg["content"]:
-                if is_thinking:
-                    console.print("\n[bold blue]💬 Réponse:[/bold blue]")
-                    is_thinking = False
-                content_part = msg["content"]
-                assistant_content += content_part
-                console.print(content_part, end="")
-
-            if "tool_calls" in msg and msg["tool_calls"]:
-                has_tool_calls = True
-                tool_calls_data = msg["tool_calls"]
-                log_verbose(f"Tool calls détectés : {tool_calls_data}")
-                console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
-                break
-
-        console.print()
-        log_verbose(
-            f"Streaming terminé. Thinking: {len(thinking_content)} chars, Contenu: {len(assistant_content)} chars"
-        )
-
-        if not has_tool_calls and MODEL_JSON_FALLBACK:
-            try:
-                fallback_calls = parse_json_tool_calls(assistant_content)
-            except Exception as parse_error:
-                log_verbose(f"Erreur lors du parsing JSON fallback : {parse_error}")
-                fallback_calls = []
-
-            if fallback_calls:
-                console.print("[yellow]🔧 Tool calls JSON détectés, conversion en format natif.[/yellow]")
-                log_verbose(f"Tool calls convertis depuis JSON : {fallback_calls}")
-                has_tool_calls = True
-                tool_calls_data = fallback_calls
-                assistant_content = ""
-
-        assistant_message = {"role": "assistant", "content": assistant_content}
-        if has_tool_calls:
-            assistant_message["tool_calls"] = tool_calls_data
-
-        return assistant_message, has_tool_calls, tool_calls_data
     messages = []
     context_sent = False
     execution_count = {}  # Track executions per question (multi-actions prêt)
@@ -1413,7 +1243,9 @@ def chat_loop(files_data: Dict[str, str]):
             log_verbose(f"Message utilisateur ajouté : {user_input[:100]}...")
         if AUTONOMY:
             show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
-        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(messages)
+        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(
+            messages, MODEL_NAME, REASONING_LEVEL
+        )
         if AUTONOMY:
             autonomy_call_counter += 1
         messages.append(assistant_message)
