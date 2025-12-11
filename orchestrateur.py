@@ -402,7 +402,7 @@ def write_file_tool(
     content: str,
     line_start: int,  # Maintenant obligatoire
     line_end: int,    # Maintenant obligatoire
-) -> str:
+) -> Tuple[bool, str]:
     """
     Fonction appelée par le modèle pour écrire/modifier un fichier.
     OBLIGATOIRE : Spécifier line_start et line_end pour toute modification.
@@ -418,15 +418,16 @@ def write_file_tool(
     try:
         full_path = full_path.resolve()
         if not str(full_path).startswith(str(root)):
-            return f"[ERROR] Path '{file_path}' is outside the project directory."
+            return False, f"[ERROR] Path '{file_path}' is outside the project directory."
     except Exception as e:
-        return f"[ERROR] Invalid path: {e}"
+        return False, f"[ERROR] Invalid path: {e}"
 
     # Refus de contenu vide (éviter les effacements accidentels)
     if content is None or content.strip() == "":
         return (
+            False,
             "[ERROR] Empty 'content' passed to write_file_tool; refusing to overwrite the file.\n"
-            "You must provide non-empty content."
+            "You must provide non-empty content.",
         )
 
     # Charger l'existant s'il existe
@@ -435,7 +436,7 @@ def write_file_tool(
         try:
             existing_text = full_path.read_text(encoding="utf-8")
         except Exception as e:
-            return f"[ERROR] Failed to read existing file before patching: {e}"
+            return False, f"[ERROR] Failed to read existing file before patching: {e}"
 
     # TOUJOURS en mode PATCH PAR LIGNES (plus de mode remplacement automatique)
     lines = existing_text.splitlines()
@@ -496,7 +497,7 @@ def write_file_tool(
         confirmation = input("Autoriser cette modification ? (o/n) : ")
 
     if confirmation.lower() not in ["o", "oui", "y", "yes"]:
-        return "[CANCELLED] User cancelled the file modification."
+        return False, "[CANCELLED] User cancelled the file modification."
 
     # Écriture disque
     try:
@@ -505,11 +506,12 @@ def write_file_tool(
             f.write(final_content)
         console.print(f"[green]✅ Fichier '{file_path}' modifié avec succès ![/green]")
         return (
+            True,
             f"[SUCCESS] File '{file_path}' written successfully "
-            f"({len(final_content)} bytes, {mode_desc})."
+            f"({len(final_content)} bytes, {mode_desc}).",
         )
     except Exception as e:
-        return f"[ERROR] Failed to write file: {e}"
+        return False, f"[ERROR] Failed to write file: {e}"
 def execute_code_tool(file_path: str) -> str:
     """
     Exécute un fichier Python de manière sécurisée.
@@ -1687,17 +1689,21 @@ AVAILABLE TOOLS (and ONLY these tools exist):
 
                     file_was_existing = (Path.cwd() / file_path).exists()
                     # Appel réel avec gestion de lignes obligatoire
-                    result = write_file_tool(file_path, content, line_start, line_end)
-                    log_verbose(f"Résultat de l'écriture : {result}")
+                    write_success, result_message = write_file_tool(
+                        file_path, content, line_start, line_end
+                    )
+                    log_verbose(
+                        f"Résultat de l'écriture : success={write_success}, message={result_message}"
+                    )
 
                     # Ajouter le résultat de l'outil
                     messages.append({
                         "role": "tool",
-                        "content": result,
+                        "content": result_message,
                         "name": function_name
                     })
 
-                    if AUTONOMY and result.strip().startswith("[SUCCESS]"):
+                    if AUTONOMY and write_success:
                         if not autonomy_first_successful_write:
                             autonomy_first_successful_write = True
                             git_dir = Path.cwd() / ".git"
@@ -1714,6 +1720,9 @@ AVAILABLE TOOLS (and ONLY these tools exist):
                             f"Auto: {'Modified' if file_was_existing else 'Created'} {file_path}"
                         )
                         commit_result = git_commit_tool(commit_message)
+                        console.print(
+                            f"[cyan]🤖 Auto-commit executed after write to {file_path}[/cyan]"
+                        )
                         log_verbose(f"Commit automatique : {commit_result[:200]}...")
                         messages.append({
                             "role": "tool",
