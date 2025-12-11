@@ -29,30 +29,54 @@ import ollama
 from tqdm import tqdm
 from rich.console import Console
 from rich.markdown import Markdown
+
 console = Console(force_terminal=True)
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_NAME = "gpt-oss:20b"
-# Configuration de compatibilité par modèle
-MODEL_COMPAT = {
-    "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
-    "qwen2.5-coder:14b": {"native_tools": False, "json_fallback": True},
-}
-DEFAULT_MODEL_COMPAT = {"native_tools": True, "json_fallback": False}
+try:
+    import config.settings as cfg
+    MODEL_NAME = cfg.MODEL_NAME
+    MODEL_COMPAT = cfg.MODEL_COMPAT
+    DEFAULT_MODEL_COMPAT = cfg.DEFAULT_MODEL_COMPAT
+    MAX_BYTES_PER_FILE = cfg.MAX_BYTES_PER_FILE
+    MAX_TOTAL_BYTES = cfg.MAX_TOTAL_BYTES
+    SCRIPT_NAME = cfg.SCRIPT_NAME
+    VERBOSE = cfg.VERBOSE
+    REASONING_LEVEL = cfg.REASONING_LEVEL
+    EXEC_TIMEOUT = cfg.EXEC_TIMEOUT
+    MAX_RETRIES = cfg.MAX_RETRIES
+    MAX_AUTONOMY_ITERATIONS = cfg.MAX_AUTONOMY_ITERATIONS
+    AUTONOMY_TIMEOUT = cfg.AUTONOMY_TIMEOUT
+    AUTONOMY = cfg.AUTONOMY
+    get_model_config = cfg.get_model_config
+except Exception as exc:
+    console.print(
+        f"[yellow]⚠️ Impossible d'importer config.settings : {exc}. Utilisation des valeurs par défaut.[/yellow]"
+    )
+    MODEL_NAME = "gpt-oss:20b"
+    MODEL_COMPAT = {
+        "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
+        "qwen2.5-coder:14b": {"native_tools": False, "json_fallback": True},
+    }
+    DEFAULT_MODEL_COMPAT = {"native_tools": True, "json_fallback": False}
+    MAX_BYTES_PER_FILE = 500 * 1024  # 500 KB par défaut
+    MAX_TOTAL_BYTES = 5 * 1024 * 1024  # 5 Mo max total envoyés au modèle
+    SCRIPT_NAME = Path(__file__).name  # Nom du script à exclure
+    VERBOSE = False  # Mode verbeux (défini par argument CLI)
+    REASONING_LEVEL = "medium"  # Niveau de réflexion : low, medium, high
+    EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
+    MAX_RETRIES = 3  # Nombre maximum de tentatives d'exécution
+    MAX_AUTONOMY_ITERATIONS = 20  # Nombre max d'itérations autonomes
+    AUTONOMY_TIMEOUT = 5  # Timeout entre itérations autonomes (secondes)
+    AUTONOMY = True  # Mode autonomie (enchaînement automatique des tool calls)
 
-MODEL_NATIVE_TOOLS = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["native_tools"]
-MODEL_JSON_FALLBACK = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)["json_fallback"]
-MAX_BYTES_PER_FILE = 500 * 1024  # 500 KB par défaut
-MAX_TOTAL_BYTES = 5 * 1024 * 1024  # 5 Mo max total envoyés au modèle
-SCRIPT_NAME = Path(__file__).name  # Nom du script à exclure
-VERBOSE = False  # Mode verbeux (défini par argument CLI)
-REASONING_LEVEL = "medium"  # Niveau de réflexion : low, medium, high
-EXEC_TIMEOUT = 30  # Timeout pour l'exécution de code (en secondes)
-MAX_RETRIES = 3  # Nombre maximum de tentatives d'exécution
-MAX_AUTONOMY_ITERATIONS = 20  # Nombre max d'itérations autonomes
-AUTONOMY_TIMEOUT = 5  # Timeout entre itérations autonomes (secondes)
-AUTONOMY = True  # Mode autonomie (enchaînement automatique des tool calls)
+    def get_model_config(model_name: str):
+        return MODEL_COMPAT.get(model_name, DEFAULT_MODEL_COMPAT)
+
+model_config = get_model_config(MODEL_NAME)
+MODEL_NATIVE_TOOLS = model_config["native_tools"]
+MODEL_JSON_FALLBACK = model_config["json_fallback"]
 # -----------------------------
 # Helpers
 # -----------------------------
