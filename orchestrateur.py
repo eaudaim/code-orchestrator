@@ -718,6 +718,211 @@ def create_venv_tool(venv_path: str = ".venv") -> str:
         console.print(f"[red]❌ {error_msg}[/red]")
         log_verbose(f"Exception lors de la création du venv : {e}")
         return error_msg
+
+
+def _run_git_command(args: List[str], root: Path):
+    """Exécute une commande Git avec gestion d'erreurs standardisée."""
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(root),
+            timeout=EXEC_TIMEOUT,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            None,
+            "",
+            "",
+            f"[ERROR] Git command 'git {' '.join(args)}' timed out after {EXEC_TIMEOUT}s.",
+        )
+    except FileNotFoundError:
+        return None, "", "", "[ERROR] Git is not installed on the system."
+    except Exception as e:
+        return None, "", "", f"[ERROR] Failed to run git command: {e}"
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    return result, stdout, stderr, ""
+
+
+def git_init_tool() -> str:
+    """Initialise un dépôt Git si nécessaire."""
+
+    root = Path.cwd()
+    git_dir = root / ".git"
+
+    if git_dir.exists():
+        return "[GIT] Repository already initialized."
+
+    result, stdout, stderr, error_msg = _run_git_command(["init"], root)
+
+    if error_msg:
+        return error_msg
+
+    output = "\n".join(filter(None, [stdout, stderr]))
+
+    if result and result.returncode == 0:
+        return "[GIT] Repository initialized successfully." + (f"\n{output}" if output else "")
+
+    return (
+        f"[ERROR] Git init failed with return code {result.returncode if result else 'unknown'}."
+        + (f"\n{output}" if output else "")
+    )
+
+
+def git_commit_tool(message: str) -> str:
+    """Ajoute tous les fichiers et crée un commit avec le message fourni."""
+
+    if not isinstance(message, str) or not message.strip():
+        return "[ERROR] Commit message must be a non-empty string."
+
+    root = Path.cwd()
+    git_dir = root / ".git"
+
+    if not git_dir.exists():
+        return "[ERROR] Git repository is not initialized. Run git_init first."
+
+    add_result, add_stdout, add_stderr, error_msg = _run_git_command(["add", "-A"], root)
+
+    if error_msg:
+        return error_msg
+
+    if add_result and add_result.returncode != 0:
+        output = "\n".join(filter(None, [add_stdout, add_stderr]))
+        return f"[ERROR] git add failed with return code {add_result.returncode}." + (f"\n{output}" if output else "")
+
+    commit_args = ["commit", "-m", message]
+    commit_result, commit_stdout, commit_stderr, error_msg = _run_git_command(commit_args, root)
+
+    if error_msg:
+        return error_msg
+
+    combined_output = "\n".join(filter(None, [commit_stdout, commit_stderr]))
+    commit_text = (commit_stdout + "\n" + commit_stderr).lower()
+
+    if commit_result and commit_result.returncode == 0:
+        return "[GIT] Commit created successfully." + (f"\n{combined_output}" if combined_output else "")
+
+    if "nothing to commit" in commit_text:
+        return "[GIT] Nothing to commit: working tree clean."
+
+    return (
+        f"[ERROR] Git commit failed with return code {commit_result.returncode if commit_result else 'unknown'}."
+        + (f"\n{combined_output}" if combined_output else "")
+    )
+
+
+def git_rollback_tool(steps: int = 1) -> str:
+    """Revient en arrière dans l'historique Git en utilisant reset --hard."""
+
+    try:
+        steps_value = int(steps)
+    except (TypeError, ValueError):
+        return f"[ERROR] Invalid steps value: {steps}. It must be a positive integer."
+
+    if steps_value <= 0:
+        return f"[ERROR] Steps must be greater than 0. Got: {steps_value}."
+
+    root = Path.cwd()
+    git_dir = root / ".git"
+
+    if not git_dir.exists():
+        return "[ERROR] Git repository is not initialized. Run git_init first."
+
+    count_result, count_stdout, count_stderr, error_msg = _run_git_command(
+        ["rev-list", "--count", "HEAD"],
+        root,
+    )
+
+    if error_msg:
+        return error_msg
+
+    if not count_result or count_result.returncode != 0:
+        output = "\n".join(filter(None, [count_stdout, count_stderr]))
+        return "[ERROR] Unable to determine commit history." + (f"\n{output}" if output else "")
+
+    try:
+        commit_count = int((count_stdout or "0").strip())
+    except ValueError:
+        commit_count = 0
+
+    if commit_count == 0:
+        return "[GIT] No commits available to roll back."
+
+    if steps_value >= commit_count:
+        return (
+            f"[GIT] Not enough history to rollback {steps_value} step(s). "
+            f"Available commits: {commit_count}."
+        )
+
+    reset_result, reset_stdout, reset_stderr, error_msg = _run_git_command(
+        ["reset", "--hard", f"HEAD~{steps_value}"],
+        root,
+    )
+
+    if error_msg:
+        return error_msg
+
+    output = "\n".join(filter(None, [reset_stdout, reset_stderr]))
+
+    if reset_result and reset_result.returncode == 0:
+        return f"[GIT] Rolled back {steps_value} commit(s) successfully." + (f"\n{output}" if output else "")
+
+    return (
+        f"[ERROR] Git rollback failed with return code {reset_result.returncode if reset_result else 'unknown'}."
+        + (f"\n{output}" if output else "")
+    )
+
+
+def git_history_tool() -> str:
+    """Retourne les 10 derniers commits formatés."""
+
+    root = Path.cwd()
+    git_dir = root / ".git"
+
+    if not git_dir.exists():
+        return "[ERROR] Git repository is not initialized. Run git_init first."
+
+    count_result, count_stdout, count_stderr, error_msg = _run_git_command(
+        ["rev-list", "--count", "HEAD"],
+        root,
+    )
+
+    if error_msg:
+        return error_msg
+
+    if not count_result or count_result.returncode != 0:
+        output = "\n".join(filter(None, [count_stdout, count_stderr]))
+        return "[ERROR] Unable to retrieve git history." + (f"\n{output}" if output else "")
+
+    try:
+        commit_count = int((count_stdout or "0").strip())
+    except ValueError:
+        commit_count = 0
+
+    if commit_count == 0:
+        return "[GIT] No git history yet."
+
+    log_result, log_stdout, log_stderr, error_msg = _run_git_command(
+        ["log", "-n", "10", "--oneline"],
+        root,
+    )
+
+    if error_msg:
+        return error_msg
+
+    if log_result and log_result.returncode == 0 and log_stdout:
+        return f"[GIT HISTORY]\n{log_stdout}"
+
+    output = "\n".join(filter(None, [log_stdout, log_stderr]))
+    if output:
+        return f"[GIT HISTORY]\n{output}"
+
+    return "[GIT] No git history yet."
 # We expose these functions to Ollama as tools
 TOOLS = [
     {
@@ -780,6 +985,51 @@ CRITICAL: ALWAYS read file first to count lines and understand structure.""",
             "properties": {
                 "venv_path": {"type": "string", "description": "Virtual environment path"}
             },
+            "required": [],
+        },
+    },
+    {
+        "name": "git_init",
+        "description": "Initialize a git repository if it is not already present.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "git_commit",
+        "description": "Stage all files and create a commit with the provided message.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Commit message (non-empty)"}
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "git_rollback",
+        "description": "Reset repository to a previous commit using git reset --hard HEAD~<steps> (steps must be > 0).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "integer",
+                    "description": "Number of commits to roll back (positive integer)",
+                    "minimum": 1,
+                    "default": 1,
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "git_history",
+        "description": "Show the 10 most recent commits in one-line format.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },
@@ -1301,7 +1551,49 @@ ONLY use the tools listed above. No exceptions."""
                         "name": function_name
                     })
                     pending_tool_responses.discard((function_name, venv_path))
-                    
+
+                elif function_name == "git_init":
+                    console.print("[dim]   🧰 Initialisation du dépôt Git[/dim]")
+                    result = git_init_tool()
+                    log_verbose(f"Résultat git_init : {result[:200]}...")
+                    messages.append({
+                        "role": "tool",
+                        "content": result,
+                        "name": function_name,
+                    })
+
+                elif function_name == "git_commit":
+                    message = arguments.get("message", "")
+                    console.print("[dim]   🧰 Commit Git demandé[/dim]")
+                    result = git_commit_tool(message)
+                    log_verbose(f"Résultat git_commit : {result[:200]}...")
+                    messages.append({
+                        "role": "tool",
+                        "content": result,
+                        "name": function_name,
+                    })
+
+                elif function_name == "git_rollback":
+                    steps = arguments.get("steps", 1)
+                    console.print(f"[dim]   🧰 Rollback Git de {steps} étape(s) demandé[/dim]")
+                    result = git_rollback_tool(steps)
+                    log_verbose(f"Résultat git_rollback : {result[:200]}...")
+                    messages.append({
+                        "role": "tool",
+                        "content": result,
+                        "name": function_name,
+                    })
+
+                elif function_name == "git_history":
+                    console.print("[dim]   🧰 Historique Git demandé[/dim]")
+                    result = git_history_tool()
+                    log_verbose(f"Résultat git_history : {result[:200]}...")
+                    messages.append({
+                        "role": "tool",
+                        "content": result,
+                        "name": function_name,
+                    })
+
                 else:
                     console.print(f"[red]   ❌ Outil inconnu : {function_name}[/red]")
             
