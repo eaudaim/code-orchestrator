@@ -356,6 +356,11 @@ def main():
         help="Répertoire contenant le code à analyser (par défaut le répertoire courant).",
     )
     parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="Répertoire de travail à analyser (par défaut: répertoire courant de l'orchestrateur)",
+    )
+    parser.add_argument(
         "--model",
         default=MODEL_NAME,
         help="Nom du modèle Ollama à utiliser (par défaut: %(default)s).",
@@ -400,6 +405,12 @@ def main():
     MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
     MODEL_JSON_FALLBACK = compat.get("json_fallback", DEFAULT_MODEL_COMPAT["json_fallback"])
 
+    work_dir = Path(args.work_dir).resolve() if args.work_dir else Path(args.directory).resolve()
+
+    if not work_dir.is_dir():
+        console.print(f"[red]❌ Work directory not found: {work_dir}[/red]")
+        sys.exit(1)
+
     set_executor_environment(
         console,
         log_verbose,
@@ -408,6 +419,7 @@ def main():
         MAX_RETRIES,
         AUTONOMY,
         SCRIPT_NAME,
+        work_dir,
     )
     set_loop_environment(
         console,
@@ -423,7 +435,7 @@ def main():
 
     if VERBOSE:
         console.print("[magenta]🔍 Mode VERBOSE activé[/magenta]")
-    
+
     console.print(f"\n[bold cyan]🚀 Ollama Code-Assistant[/bold cyan]")
     console.print(f"[dim]Modèle : {MODEL_NAME}[/dim]")
     console.print(f"[dim]Niveau de réflexion : {REASONING_LEVEL}[/dim]")
@@ -432,11 +444,7 @@ def main():
     console.print(
         f"[dim]Compat tools natifs : {MODEL_NATIVE_TOOLS} | JSON fallback : {MODEL_JSON_FALLBACK}[/dim]"
     )
-    root = Path(args.directory).resolve()
-    if not root.is_dir():
-        console.print(f"[red]❌ Erreur : {root} n'est pas un répertoire valide.[/red]")
-        sys.exit(1)
-    files_data = collect_files(root)
+    files_data = collect_files(work_dir)
     if not files_data:
         console.print(
             "[yellow]ℹ️  Aucun fichier pertinent collecté ; démarrage avec un contexte initial vide.[/yellow]"

@@ -74,6 +74,7 @@ def collect_files(
     max_total_bytes: int = MAX_TOTAL_BYTES,
     max_bytes_per_file: int = MAX_BYTES_PER_FILE,
 ) -> Dict[str, str]:
+    root = Path(root).resolve()
     files_data: Dict[str, str] = {}
     total_bytes = 0
     console.print(f"[cyan]🔍 Scan du répertoire {root}...[/cyan]")
