@@ -1208,6 +1208,7 @@ def chat_loop(files_data: Dict[str, str]):
     pending_tool_responses: Set[Tuple[str, str]] = set()
     tool_call_depth = 0  # Limite la profondeur des appels automatiques (compatible autonomie)
     autonomy_call_counter = 0
+    autonomy_first_successful_write = False
     while True:
         # Réaffiche l'invite utilisateur avant chaque interaction
         console.print("\n[bold green]Vous> [/bold green]", end="")
@@ -1274,7 +1275,17 @@ def chat_loop(files_data: Dict[str, str]):
                 log_verbose(f"Tool call brut complet : {call}")
                 
                 # ✅ VALIDATION DES TOOL CALLS - Bloquer les hallucinations
-                valid_tools = {"list_files", "read_file", "write_file", "execute_code", "create_venv"}
+                valid_tools = {
+                    "list_files",
+                    "read_file",
+                    "write_file",
+                    "execute_code",
+                    "create_venv",
+                    "git_init",
+                    "git_commit",
+                    "git_rollback",
+                    "git_history",
+                }
                 if function_name not in valid_tools:
                     console.print(f"[red]   ❌ OUTIL HALLUCINÉ : {function_name} n'existe pas ![/red]")
                     
@@ -1475,11 +1486,12 @@ ONLY use the tools listed above. No exceptions."""
                         mode_msg = "remplacement complet du fichier"
                     else:
                         mode_msg = f"remplacement lignes {line_start}-{line_end}"
-                        
+
                     console.print(
                         f"[dim]   ✏️  Écriture ({mode_msg}) dans : {file_path}[/dim]"
                     )
 
+                    file_was_existing = (Path.cwd() / file_path).exists()
                     # Appel réel avec gestion de lignes obligatoire
                     result = write_file_tool(file_path, content, line_start, line_end)
                     log_verbose(f"Résultat de l'écriture : {result}")
@@ -1490,6 +1502,30 @@ ONLY use the tools listed above. No exceptions."""
                         "content": result,
                         "name": function_name
                     })
+
+                    if AUTONOMY and result.strip().startswith("[SUCCESS]"):
+                        if not autonomy_first_successful_write:
+                            autonomy_first_successful_write = True
+                            git_dir = Path.cwd() / ".git"
+                            if not git_dir.exists():
+                                init_result = git_init_tool()
+                                log_verbose(f"Initialisation git automatique : {init_result[:200]}...")
+                                messages.append({
+                                    "role": "tool",
+                                    "content": init_result,
+                                    "name": "git_init",
+                                })
+
+                        commit_message = (
+                            f"Auto: {'Modified' if file_was_existing else 'Created'} {file_path}"
+                        )
+                        commit_result = git_commit_tool(commit_message)
+                        log_verbose(f"Commit automatique : {commit_result[:200]}...")
+                        messages.append({
+                            "role": "tool",
+                            "content": commit_result,
+                            "name": "git_commit",
+                        })
                     
                 elif function_name == "execute_code":
                     file_path = arguments.get("file_path") or arguments.get("path", "")
@@ -1576,7 +1612,14 @@ ONLY use the tools listed above. No exceptions."""
                 elif function_name == "git_rollback":
                     steps = arguments.get("steps", 1)
                     console.print(f"[dim]   🧰 Rollback Git de {steps} étape(s) demandé[/dim]")
-                    result = git_rollback_tool(steps)
+                    if AUTONOMY:
+                        result = git_rollback_tool(steps)
+                    else:
+                        confirmation = input("Confirmer le rollback git ? (o/n) : ")
+                        if confirmation.lower() not in {"o", "oui", "y", "yes"}:
+                            result = "[CANCELLED] Git rollback cancelled by user."
+                        else:
+                            result = git_rollback_tool(steps)
                     log_verbose(f"Résultat git_rollback : {result[:200]}...")
                     messages.append({
                         "role": "tool",
