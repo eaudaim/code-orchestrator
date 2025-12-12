@@ -1,3 +1,4 @@
+import json
 from typing import Any, Callable, Dict, List, Tuple
 
 import ollama
@@ -10,6 +11,16 @@ MODEL_JSON_FALLBACK = False
 TOOLS: List[Dict[str, Any]] = []
 log_verbose: Callable[[str], None] = lambda message: None
 parse_json_tool_calls: Callable[[str], List[Dict[str, Any]]] = lambda text: []
+
+
+def validate_messages_json(messages: List[Dict[str, Any]]) -> Tuple[bool, str | None]:
+    """Valide que les messages peuvent être sérialisés en JSON avant l'envoi à Ollama."""
+
+    try:
+        json.dumps(messages)
+        return True, None
+    except (TypeError, ValueError) as e:
+        return False, f"Invalid JSON in messages: {e}"
 
 
 def set_model_context(
@@ -48,6 +59,13 @@ def call_model_and_stream(
     console.print("[dim]🤖 Le modèle réfléchit...[/dim]")
     log_verbose(f"Nombre de messages dans l'historique : {len(messages)}")
 
+    valid, error = validate_messages_json(messages)
+    if not valid:
+        console.print(f"[yellow]⚠️ Messages JSON invalides : {error}[/yellow]")
+        error_content = f"[JSON_ERROR] Invalid message format: {error}"
+        assistant_message = {"role": "assistant", "content": error_content}
+        return assistant_message, False, []
+
     try:
         log_verbose(f"Appel à ollama.chat() avec modèle {model_name}, reasoning={reasoning_level}")
         ollama_params: Dict[str, Any] = {
@@ -69,7 +87,9 @@ def call_model_and_stream(
     except Exception as e:
         console.print(f"[red]❌ Erreur lors de l'appel au modèle : {e}[/red]")
         log_verbose(f"Exception complète : {e}")
-        return {"role": "assistant", "content": ""}, False, []
+        error_content = f"[MODEL_ERROR] Error during model initialization: {str(e)}"
+        assistant_message = {"role": "assistant", "content": error_content}
+        return assistant_message, False, []
 
     assistant_content = ""
     thinking_content = ""
@@ -80,37 +100,50 @@ def call_model_and_stream(
     is_thinking = False
 
     console.print("[bold blue]Assistant> [/bold blue]")
-    for chunk in response:
-        chunk_count += 1
-        log_verbose(f"Chunk #{chunk_count} reçu : {chunk}")
+    try:
+        for chunk in response:
+            chunk_count += 1
+            log_verbose(f"Chunk #{chunk_count} reçu : {chunk}")
 
-        if "message" not in chunk:
-            continue
+            if "message" not in chunk:
+                continue
 
-        msg = chunk["message"]
+            msg = chunk["message"]
 
-        if "thinking" in msg and msg["thinking"]:
-            thinking_part = msg["thinking"]
-            thinking_content += thinking_part
-            if not is_thinking:
-                console.print("[dim cyan]💭 Réflexion en cours...[/dim cyan]", end="")
-                is_thinking = True
-            console.print(thinking_part, end="")
+            if "thinking" in msg and msg["thinking"]:
+                thinking_part = msg["thinking"]
+                thinking_content += thinking_part
+                if not is_thinking:
+                    console.print("[dim cyan]💭 Réflexion en cours...[/dim cyan]", end="")
+                    is_thinking = True
+                console.print(thinking_part, end="")
 
-        if "content" in msg and msg["content"]:
-            if is_thinking:
-                console.print("\n[bold blue]💬 Réponse:[/bold blue]")
-                is_thinking = False
-            content_part = msg["content"]
-            assistant_content += content_part
-            console.print(content_part, end="")
+            if "content" in msg and msg["content"]:
+                if is_thinking:
+                    console.print("\n[bold blue]💬 Réponse:[/bold blue]")
+                    is_thinking = False
+                content_part = msg["content"]
+                assistant_content += content_part
+                console.print(content_part, end="")
 
-        if "tool_calls" in msg and msg["tool_calls"]:
-            has_tool_calls = True
-            tool_calls_data = msg["tool_calls"]
-            log_verbose(f"Tool calls détectés : {tool_calls_data}")
-            console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
-            break
+            if "tool_calls" in msg and msg["tool_calls"]:
+                has_tool_calls = True
+                tool_calls_data = msg["tool_calls"]
+                log_verbose(f"Tool calls détectés : {tool_calls_data}")
+                console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
+                break
+    except ollama.ResponseError as e:
+        console.print(f"[yellow]⚠️ Tool call malformé ignoré : {e}[/yellow]")
+        log_verbose(f"Ollama ResponseError détaillée : {e}")
+        error_content = f"[TOOL_CALL_ERROR] Malformed JSON detected by Ollama: {str(e)}"
+        assistant_message = {"role": "assistant", "content": error_content}
+        return assistant_message, False, []
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Erreur streaming capturée : {e}[/yellow]")
+        log_verbose(f"Exception streaming détaillée : {e}")
+        error_content = f"[STREAMING_ERROR] Unexpected error during model response: {str(e)}"
+        assistant_message = {"role": "assistant", "content": error_content}
+        return assistant_message, False, []
 
     console.print()
     log_verbose(
