@@ -116,9 +116,22 @@ def autonomy_loop(messages: List[Dict[str, Any]], files_data: Dict[str, str]):
 
     if AUTONOMY:
         show_autonomy_banner(autonomy_call_counter + 1, MAX_AUTONOMY_ITERATIONS)
-    assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(
-        messages, MODEL_NAME, REASONING_LEVEL
-    )
+    try:
+        assistant_message, has_tool_calls, tool_calls_data = call_model_and_stream(
+            messages, MODEL_NAME, REASONING_LEVEL
+        )
+    except Exception as e:
+        console.print(f"[red]❌ Erreur modèle capturée : {e}[/red]")
+        log_verbose(f"Erreur call_model_and_stream : {e}")
+        error_message = {
+            "role": "assistant",
+            "content": (
+                f"[MODEL_ERROR] Error during model call: {str(e)}. "
+                "Please rephrase your request or try a different approach."
+            ),
+        }
+        messages.append(error_message)
+        return
     if AUTONOMY:
         autonomy_call_counter += 1
     messages.append(assistant_message)
