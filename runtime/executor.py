@@ -26,6 +26,28 @@ log_verbose = lambda message: None  # noqa: E731
 WORK_DIR = Path.cwd()
 
 
+def _resolve_within_workdir(user_path: str) -> Path:
+    candidate = (WORK_DIR / user_path).resolve()
+    root = WORK_DIR.resolve()
+
+    is_within = False
+    if hasattr(candidate, "is_relative_to"):
+        is_within = candidate.is_relative_to(root)
+    else:
+        try:
+            candidate.relative_to(root)
+            is_within = True
+        except ValueError:
+            is_within = False
+
+    if not is_within:
+        raise ValueError(
+            f"[ERROR] Path '{user_path}' is outside the project directory (WORK_DIR)."
+        )
+
+    return candidate
+
+
 def set_executor_environment(
     console_obj,
     logger,
@@ -70,7 +92,10 @@ def detect_dangerous_patterns(code: str) -> List[str]:
 
 
 def read_file_tool(file_path: str) -> str:
-    full_path = (WORK_DIR / file_path).resolve()
+    try:
+        full_path = _resolve_within_workdir(file_path)
+    except ValueError as error:
+        return str(error)
 
     if full_path == Path(__file__).resolve() or full_path.name == SCRIPT_NAME:
         return "[ERROR] Reading the orchestrator script is not allowed."
@@ -82,7 +107,7 @@ def read_file_tool(file_path: str) -> str:
 
 def list_files_tool(directory_path: str = ".") -> str:
     try:
-        target_dir = WORK_DIR / directory_path
+        target_dir = _resolve_within_workdir(directory_path)
         log_verbose(f"list_files_tool: {target_dir}")
 
         if not target_dir.exists():
