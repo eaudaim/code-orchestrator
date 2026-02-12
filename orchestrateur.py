@@ -353,7 +353,7 @@ def main():
         "directory",
         nargs="?",
         default=None,
-        help="Répertoire contenant le code à analyser (par défaut: /workdir).",
+        help="Répertoire contenant le code à analyser (par défaut: ./workdir à côté de orchestrateur.py).",
     )
     parser.add_argument(
         "--work-dir",
@@ -405,9 +405,10 @@ def main():
     MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
     MODEL_JSON_FALLBACK = compat.get("json_fallback", DEFAULT_MODEL_COMPAT["json_fallback"])
 
-    selected_dir = args.work_dir or args.directory or "/workdir"
-    work_dir = Path(selected_dir).resolve()
     orchestrator_root = Path(__file__).resolve().parent
+    default_work_dir = orchestrator_root / "workdir"
+    selected_dir = args.work_dir or args.directory or str(default_work_dir)
+    work_dir = Path(selected_dir).resolve()
 
     if work_dir == orchestrator_root:
         console.print(
