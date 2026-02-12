@@ -352,13 +352,13 @@ def main():
     parser.add_argument(
         "directory",
         nargs="?",
-        default=".",
-        help="Répertoire contenant le code à analyser (par défaut le répertoire courant).",
+        default=None,
+        help="Répertoire contenant le code à analyser (par défaut: /workdir).",
     )
     parser.add_argument(
         "--work-dir",
         default=None,
-        help="Répertoire de travail à analyser (par défaut: répertoire courant de l'orchestrateur)",
+        help="Répertoire de travail à analyser (prioritaire sur l'argument positionnel).",
     )
     parser.add_argument(
         "--model",
@@ -405,11 +405,25 @@ def main():
     MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
     MODEL_JSON_FALLBACK = compat.get("json_fallback", DEFAULT_MODEL_COMPAT["json_fallback"])
 
-    work_dir = Path(args.work_dir).resolve() if args.work_dir else Path(args.directory).resolve()
+    selected_dir = args.work_dir or args.directory or "/workdir"
+    work_dir = Path(selected_dir).resolve()
+    orchestrator_root = Path(__file__).resolve().parent
 
-    if not work_dir.is_dir():
-        console.print(f"[red]❌ Work directory not found: {work_dir}[/red]")
+    if work_dir == orchestrator_root:
+        console.print(
+            "[red]❌ Refus de scanner le dépôt de l'orchestrateur.[/red]\n"
+            "Le modèle ne doit voir que le workdir cible. "
+            "Indiquez un répertoire projet distinct via l'argument positionnel ou `--work-dir`."
+        )
         sys.exit(1)
+
+    if work_dir.exists() and not work_dir.is_dir():
+        console.print(f"[red]❌ Work directory path is not a directory: {work_dir}[/red]")
+        sys.exit(1)
+
+    if not work_dir.exists():
+        work_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[yellow]📁 Work directory created: {work_dir}[/yellow]")
 
     set_executor_environment(
         console,
