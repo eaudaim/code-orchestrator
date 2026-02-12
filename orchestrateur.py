@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Code-Assistant avec Ollama (gpt-oss:20b)
+Code-Assistant avec Ollama (gpt-oss-20b-64k:latest)
 ========================================
 Ce script lit le contenu d'un répertoire, l'envoie au modèle
 et vous propose une interface interactive pour poser des questions
@@ -58,9 +58,9 @@ except Exception as exc:
     console.print(
         f"[yellow]⚠️ Impossible d'importer config.settings : {exc}. Utilisation des valeurs par défaut.[/yellow]"
     )
-    MODEL_NAME = "gpt-oss:20b"
+    MODEL_NAME = "gpt-oss-20b-64k:latest"
     MODEL_COMPAT = {
-        "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
+        "gpt-oss-20b-64k:latest": {"native_tools": True, "json_fallback": False},
         "qwen2.5-coder:14b": {"native_tools": False, "json_fallback": True},
     }
     DEFAULT_MODEL_COMPAT = {"native_tools": True, "json_fallback": False}
