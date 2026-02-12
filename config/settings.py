@@ -3,10 +3,10 @@
 from pathlib import Path
 import sys
 
-MODEL_NAME = "gpt-oss:20b"
+MODEL_NAME = "gpt-oss-20b-64k:latest"
 
 MODEL_COMPAT = {
-    "gpt-oss:20b": {"native_tools": True, "json_fallback": False},
+    "gpt-oss-20b-64k:latest": {"native_tools": True, "json_fallback": False},
     "qwen2.5-coder:14b": {"native_tools": False, "json_fallback": True},
 }
 

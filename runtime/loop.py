@@ -13,7 +13,7 @@ try:
     EXEC_TIMEOUT = cfg.EXEC_TIMEOUT
     MAX_RETRIES = cfg.MAX_RETRIES
 except Exception:
-    MODEL_NAME = "gpt-oss:20b"
+    MODEL_NAME = "gpt-oss-20b-64k:latest"
     REASONING_LEVEL = "medium"
     MAX_AUTONOMY_ITERATIONS = 20
     AUTONOMY_TIMEOUT = 5
