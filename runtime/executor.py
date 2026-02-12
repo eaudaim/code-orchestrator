@@ -24,9 +24,18 @@ except Exception:
 console = None
 log_verbose = lambda message: None  # noqa: E731
 WORK_DIR = Path.cwd()
+OUTSIDE_PROJECT_ERROR = "[ERROR] Path '{user_path}' is outside the project directory."
 
 
 def _resolve_within_workdir(user_path: str) -> Path:
+    """Resolve a user path and enforce it stays inside WORK_DIR.
+
+    Static validation examples:
+    - src/main.py -> allowed
+    - ../secret.txt -> rejected
+    - /etc/passwd -> rejected
+    - /abs/path/to/repo/src/main.py -> allowed (if under WORK_DIR)
+    """
     candidate = (WORK_DIR / user_path).resolve()
     root = WORK_DIR.resolve()
 
@@ -41,9 +50,7 @@ def _resolve_within_workdir(user_path: str) -> Path:
             is_within = False
 
     if not is_within:
-        raise ValueError(
-            f"[ERROR] Path '{user_path}' is outside the project directory (WORK_DIR)."
-        )
+        raise ValueError(OUTSIDE_PROJECT_ERROR.format(user_path=user_path))
 
     return candidate
 
@@ -195,15 +202,10 @@ def write_file_tool(
     line_start: int,
     line_end: int,
 ) -> Tuple[bool, str]:
-    root = WORK_DIR
-    full_path = WORK_DIR / file_path
-
     try:
-        full_path = full_path.resolve()
-        if not str(full_path).startswith(str(root)):
-            return False, f"[ERROR] Path '{file_path}' is outside the project directory."
+        full_path = _resolve_within_workdir(file_path)
     except Exception as e:
-        return False, f"[ERROR] Invalid path: {e}"
+        return False, str(e)
 
     if content is None or content.strip() == "":
         return (
@@ -287,20 +289,17 @@ def write_file_tool(
 
 def execute_code_tool(file_path: str) -> str:
     root = WORK_DIR
-    full_path = root / file_path
+
+    try:
+        full_path = _resolve_within_workdir(file_path)
+    except ValueError as error:
+        return str(error)
 
     if not full_path.exists() or not full_path.is_file():
         return f"[ERROR] File '{file_path}' not found."
 
     if not file_path.endswith('.py'):
         return f"[ERROR] Only Python (.py) files can be executed. Got: {file_path}"
-
-    try:
-        full_path = full_path.resolve()
-        if not str(full_path).startswith(str(root)):
-            return f"[ERROR] Path '{file_path}' is outside the project directory."
-    except Exception as e:
-        return f"[ERROR] Invalid path: {e}"
 
     try:
         code_content = full_path.read_text(encoding='utf-8')
@@ -422,13 +421,11 @@ def execute_code_tool(file_path: str) -> str:
 
 def create_venv_tool(venv_path: str = ".venv") -> str:
     root = WORK_DIR
-    venv_dir = root / venv_path
+
     try:
-        venv_dir = venv_dir.resolve()
-        if not str(venv_dir).startswith(str(root)):
-            return f"[ERROR] Venv path '{venv_path}' is outside the project directory."
-    except Exception as e:
-        return f"[ERROR] Invalid venv path: {e}"
+        venv_dir = _resolve_within_workdir(venv_path)
+    except ValueError as error:
+        return str(error)
     console.print(f"\n[cyan]🐍 Le modèle veut créer un environnement virtuel : [bold]{venv_path}[/bold][/cyan]")
     console.print("[dim]Commande exécutée : python3 -m venv <venv_path>[/dim]")
     if venv_dir.exists():
