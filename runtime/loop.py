@@ -571,8 +571,11 @@ AVAILABLE TOOLS (and ONLY these tools exist):
             autonomy_call_counter += 1
         messages.append(assistant_message)
 
-        if not (AUTONOMY and has_tool_calls and tool_call_depth < MAX_AUTONOMY_ITERATIONS):
-            if AUTONOMY and has_tool_calls and tool_call_depth >= MAX_AUTONOMY_ITERATIONS:
+        if not has_tool_calls:
+            break
+
+        if tool_call_depth >= MAX_AUTONOMY_ITERATIONS:
+            if AUTONOMY:
                 console.print(
                     "[yellow]⚠️  Arrêt automatique: limite d'itérations atteinte avant nouveaux tool calls.[/yellow]"
                 )
