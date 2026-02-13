@@ -347,7 +347,7 @@ def main():
     global VERBOSE, REASONING_LEVEL, EXEC_TIMEOUT, MAX_RETRIES, MODEL_NAME, MODEL_NATIVE_TOOLS, MODEL_JSON_FALLBACK, AUTONOMY
     
     parser = argparse.ArgumentParser(
-        description="Ollama Code-Assistant (utilisez --autonomy pour enchaîner les tool calls sans confirmation)"
+        description="Ollama Code-Assistant (utilisez --autonomy/--no-autonomy pour piloter l'enchaînement automatique des tool calls)"
     )
     parser.add_argument(
         "directory",
@@ -390,8 +390,19 @@ def main():
     )
     parser.add_argument(
         "--autonomy",
-        action="store_true",
-        help="Active l'autonomie: le modèle enchaîne automatiquement les tool calls sans attente utilisateur",
+        action="store_const",
+        const=True,
+        default=None,
+        dest="autonomy",
+        help="Force l'autonomie: le modèle enchaîne automatiquement les tool calls sans attente utilisateur",
+    )
+    parser.add_argument(
+        "--no-autonomy",
+        action="store_const",
+        const=False,
+        default=None,
+        dest="autonomy",
+        help="Désactive l'autonomie: chaque étape nécessite une validation utilisateur",
     )
     args = parser.parse_args()
     VERBOSE = args.verbose
@@ -399,7 +410,8 @@ def main():
     EXEC_TIMEOUT = args.exec_timeout
     MAX_RETRIES = args.max_retries
     MODEL_NAME = args.model
-    AUTONOMY = args.autonomy
+    if args.autonomy is not None:
+        AUTONOMY = args.autonomy
 
     compat = MODEL_COMPAT.get(MODEL_NAME, DEFAULT_MODEL_COMPAT)
     MODEL_NATIVE_TOOLS = compat.get("native_tools", DEFAULT_MODEL_COMPAT["native_tools"])
@@ -459,6 +471,7 @@ def main():
     console.print(
         f"[dim]Compat tools natifs : {MODEL_NATIVE_TOOLS} | JSON fallback : {MODEL_JSON_FALLBACK}[/dim]"
     )
+    console.print(f"[dim]Autonomie effective : {AUTONOMY}[/dim]")
     files_data = collect_files(work_dir)
     if not files_data:
         console.print(
