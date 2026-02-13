@@ -23,6 +23,74 @@ def validate_messages_json(messages: List[Dict[str, Any]]) -> Tuple[bool, str | 
         return False, f"Invalid JSON in messages: {e}"
 
 
+def normalize_tool_calls(raw_calls: List[Any]) -> List[Dict[str, Any]]:
+    """Normalise les tool calls en dictionnaires JSON-sérialisables."""
+
+    normalized_calls: List[Dict[str, Any]] = []
+
+    for index, raw_call in enumerate(raw_calls or []):
+        if isinstance(raw_call, dict):
+            normalized_calls.append(raw_call)
+            continue
+
+        if raw_call is None:
+            log_verbose(f"Tool call ignoré (index={index}) : valeur None inattendue")
+            continue
+
+        if not hasattr(raw_call, "__dict__") and not isinstance(raw_call, (dict, list, tuple, str, int, float, bool)):
+            log_verbose(
+                f"Tool call conversion potentiellement partielle (index={index}) : type inattendu {type(raw_call)}"
+            )
+
+        raw_call_dict = raw_call if isinstance(raw_call, dict) else {}
+        function_obj = getattr(raw_call, "function", None) or raw_call_dict.get("function", {})
+        function_dict = function_obj if isinstance(function_obj, dict) else {}
+
+        function_name = getattr(function_obj, "name", None) or function_dict.get("name")
+        raw_arguments = getattr(function_obj, "arguments", None)
+        if raw_arguments is None:
+            raw_arguments = function_dict.get("arguments")
+
+        parsed_arguments: Dict[str, Any]
+        if isinstance(raw_arguments, dict):
+            parsed_arguments = raw_arguments
+        elif isinstance(raw_arguments, str):
+            try:
+                loaded_arguments = json.loads(raw_arguments)
+                if isinstance(loaded_arguments, dict):
+                    parsed_arguments = loaded_arguments
+                else:
+                    log_verbose(
+                        "Tool call arguments non dict après json.loads "
+                        f"(index={index}, type={type(loaded_arguments)}), fallback vers {{}}"
+                    )
+                    parsed_arguments = {}
+            except (TypeError, ValueError) as parse_error:
+                log_verbose(
+                    f"Tool call arguments non parsables (index={index}) : {parse_error}. fallback vers {{}}"
+                )
+                parsed_arguments = {}
+        else:
+            if raw_arguments is not None:
+                log_verbose(
+                    f"Tool call arguments de type inattendu (index={index}, type={type(raw_arguments)}), fallback vers {{}}"
+                )
+            parsed_arguments = {}
+
+        normalized_calls.append(
+            {
+                "id": getattr(raw_call, "id", None) or raw_call_dict.get("id"),
+                "type": getattr(raw_call, "type", None) or raw_call_dict.get("type"),
+                "function": {
+                    "name": function_name,
+                    "arguments": parsed_arguments,
+                },
+            }
+        )
+
+    return normalized_calls
+
+
 def set_model_context(
     tools: List[Dict[str, Any]],
     model_native_tools: bool,
@@ -128,7 +196,7 @@ def call_model_and_stream(
 
             if "tool_calls" in msg and msg["tool_calls"]:
                 has_tool_calls = True
-                tool_calls_data = msg["tool_calls"]
+                tool_calls_data = normalize_tool_calls(msg["tool_calls"])
                 log_verbose(f"Tool calls détectés : {tool_calls_data}")
                 console.print(f"\n[yellow]🔧 Le modèle appelle un outil...[/yellow]")
                 break
